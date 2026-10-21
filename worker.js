@@ -10,7 +10,7 @@ const log = (...a) => console.log(new Date().toISOString(), ...a);
 
 const sessions = new Map(); // user_id -> session
 const pending = new Map();  // user_id -> {status,message}
-const setStatus = (id, status, message = "") => pending.set(id, { user_id: id, status, message });
+const setStatus = (id, status, message = "") => { const x = sessions.get(id); if (x) x.status = { user_id: id, status, message }; pending.set(id, { user_id: id, status, message }); };
 
 async function api(method, body) {
   const r = await fetch(`${base}/api/public/cloud-worker`, { method, headers: { "Content-Type": "application/json", "x-worker-secret": secret }, body: body ? JSON.stringify(body) : undefined });
@@ -87,6 +87,7 @@ async function tick() {
     for (const j of jobs) if (!sessions.has(j.user_id)) start(j);
     for (const s of sessions.values()) if (s.retryAt && Date.now() >= s.retryAt) { s.retryAt = 0; try { s.conn?.disconnect(); } catch {} connect(s); }
   } catch (e) { log("tick failed", e.message); }
+  for (const x of sessions.values()) if (x.status && !pending.has(x.job.user_id)) pending.set(x.job.user_id, x.status);
   if (pending.size) { const statuses = [...pending.values()]; pending.clear(); api("POST", { statuses }).catch((e) => log("status failed", e.message)); }
 }
 log(`AuraTok Cloud Worker → ${base}`);
