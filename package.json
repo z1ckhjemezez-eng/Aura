@@ -1,0 +1,10 @@
+{
+  "name": "auratok-cloud-worker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "worker.js",
+  "engines": { "node": ">=20" },
+  "scripts": { "start": "node worker.js" },
+  "dependencies": { "tiktok-live-connector": "2.5.0" }
+}
