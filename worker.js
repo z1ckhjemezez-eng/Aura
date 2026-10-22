@@ -4,6 +4,7 @@
 // fragments are tracked here too, so a cloud connection needs no extra program.
 import { TikTokLiveConnection, WebcastEvent, ControlEvent } from "tiktok-live-connector";
 import { createBattleTracker } from "./battle.js";
+import { createBoosterCollector } from "./boosters.js";
 
 const base = String(process.env.AURATOK_URL || "https://auratok.com").replace(/\/+$/, "");
 const secret = process.env.WORKER_SECRET || "";
@@ -26,14 +27,20 @@ const BATTLE = WebcastEvent.LINK_MIC_BATTLE ?? "linkMicBattle";
 const ARMIES = WebcastEvent.LINK_MIC_ARMIES ?? "linkMicArmies";
 
 function start(job) {
-  const s = { job, conn: null, tracker: null, retryAt: 0, likeBuf: 0, likeTimer: null, stopped: false };
+  const s = { job, conn: null, tracker: null, retryAt: 0, likeBuf: 0, likeTimer: null, stopped: false, booster: null };
+  s.booster = createBoosterCollector({ spoolDir: `${process.env.BOOSTER_SPOOL_DIR || '/tmp/auratok-booster-spool'}/${job.user_id}`, post: async body => {
+    const response = await fetch(`${base}/api/public/boosters`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': job.api_key }, body: JSON.stringify(body), signal: AbortSignal.timeout(15000) });
+    if (!response.ok) throw new Error('Booster delivery failed');
+  }, log });
   sessions.set(job.user_id, s);
   connect(s);
 }
 function stop(id) {
   const s = sessions.get(id); if (!s) return;
   s.stopped = true; try { s.conn?.disconnect(); } catch {}
+  s.booster?.close();
   try { s.tracker?.stop(); } catch {}
+  try { s.conn?.removeAllListeners(); s.conn?.disconnect(); } catch {}
   sessions.delete(id); setStatus(id, "off", "");
 }
 async function get(s, path, params) {
@@ -55,6 +62,7 @@ function connect(s) {
   const { username } = s.job;
   setStatus(s.job.user_id, "connecting", "");
   try { s.tracker?.stop(); } catch {}
+  try { s.conn?.removeAllListeners(); s.conn?.disconnect(); } catch {}
   s.tracker = createBattleTracker({
     username,
     log: (m) => log(`@${username}`, m),
@@ -65,11 +73,14 @@ function connect(s) {
   const opts = { enableExtendedGiftInfo: false }; if (signApiKey) opts.signApiKey = signApiKey;
   const c = new TikTokLiveConnection(username, opts); s.conn = c;
   c.connect().then((state) => {
+    if (s.stopped || s.conn !== c) return;
     log(`live @${username}`);
     const room = state?.roomInfo || c.roomInfo || {};
     const owner = room?.owner?.id_str || room?.owner?.id || room?.owner_user_id || room?.data?.owner?.id_str || "";
     tracker.setHostId(String(owner || ""));
     tracker.setHostId(room);
+    s.booster.setCreator(tracker.status().hostId);
+    s.booster.connected();
     setStatus(s.job.user_id, "live", "");
   }).catch((err) => {
     const m = String(err?.message ?? err);
@@ -77,7 +88,7 @@ function connect(s) {
     setStatus(s.job.user_id, offline ? "waiting" : "error", offline ? "" : m.slice(0, 280));
     s.retryAt = Date.now() + (offline ? 60_000 : 120_000);
   });
-  c.on(ControlEvent.DISCONNECTED, () => { if (!s.stopped) { setStatus(s.job.user_id, "waiting", ""); s.retryAt = Date.now() + 30_000; } });
+  c.on(ControlEvent.DISCONNECTED, () => { if (!s.stopped && s.conn === c) { s.booster.disconnected(); setStatus(s.job.user_id, "waiting", ""); s.retryAt = Date.now() + 30_000; } });
   c.on(WebcastEvent.CHAT, (d) => {
     const msg = String(d.comment || "").trim(); if (!msg) return;
     get(s, "/api/public/chat", { user: handleOf(d), msg, avatar: avatarOf(d.user), isFollower: Number(d.user?.followRole ?? 0) >= 1 ? "1" : "0", isSubscriber: d.user?.isSubscriber ? "1" : "0", isModerator: d.user?.isModerator ? "1" : "0" });
@@ -104,7 +115,14 @@ function connect(s) {
   c.on(WebcastEvent.SHARE, (d) => post(s, "/api/public/events", { type: "share", username: handleOf(d) }));
   c.on(BATTLE, (m) => tracker.onBattleMessage(m));
   c.on(ARMIES, (m) => tracker.onArmiesMessage(m));
-  c.on("decodedData", (type, data) => tracker.onDecoded(type, data));
+  c.on(WebcastEvent.LINK_MIC_BATTLE_ITEM_CARD ?? 'linkMicBattleItemCard', m => { s.booster.setCreator(tracker.status().hostId); s.booster.observe('WebcastLinkMicBattleItemCard', m); });
+  c.on("decodedData", (raw, decoded) => {
+    const type = decoded?.type ?? raw?.type ?? raw;
+    const data = decoded?.data ?? decoded ?? raw?.data;
+    tracker.onDecoded(type, data);
+    s.booster.setCreator(tracker.status().hostId);
+    if (String(type) !== 'WebcastLinkMicBattleItemCard') s.booster.observe(String(type), data);
+  });
 }
 
 async function tick() {
