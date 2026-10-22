@@ -1,6 +1,9 @@
 // AuraTok Cloud Worker — keeps TikTok LIVE connections open for every creator
 // who entered their username on AuraTok, and forwards events to the AuraTok API.
+// Battles (start/end, real team scores, opponent, contributors) and league
+// fragments are tracked here too, so a cloud connection needs no extra program.
 import { TikTokLiveConnection, WebcastEvent, ControlEvent } from "tiktok-live-connector";
+import { createBattleTracker } from "./battle.js";
 
 const base = String(process.env.AURATOK_URL || "https://auratok.com").replace(/\/+$/, "");
 const secret = process.env.WORKER_SECRET || "";
@@ -19,15 +22,18 @@ async function api(method, body) {
 }
 const avatarOf = (u) => u?.profilePicture?.urls?.[0] || u?.avatarThumb?.urlList?.[0] || "";
 const handleOf = (d) => { const u = d.user || {}; return u.uniqueId || u.displayId || u.username || d.uniqueId || u.nickname || d.nickname || "viewer"; };
+const BATTLE = WebcastEvent.LINK_MIC_BATTLE ?? "linkMicBattle";
+const ARMIES = WebcastEvent.LINK_MIC_ARMIES ?? "linkMicArmies";
 
 function start(job) {
-  const s = { job, conn: null, retryAt: 0, likeBuf: 0, likeTimer: null, stopped: false };
+  const s = { job, conn: null, tracker: null, retryAt: 0, likeBuf: 0, likeTimer: null, stopped: false };
   sessions.set(job.user_id, s);
   connect(s);
 }
 function stop(id) {
   const s = sessions.get(id); if (!s) return;
   s.stopped = true; try { s.conn?.disconnect(); } catch {}
+  try { s.tracker?.stop(); } catch {}
   sessions.delete(id); setStatus(id, "off", "");
 }
 async function get(s, path, params) {
@@ -36,14 +42,36 @@ async function get(s, path, params) {
 async function post(s, path, body) {
   try { await fetch(`${base}${path}`, { method: "POST", headers: { "Content-Type": "application/json", "x-api-key": s.job.api_key }, body: JSON.stringify(body) }); } catch (e) { log("forward failed", e.message); }
 }
+/** Battle/league endpoints read the creator key from the payload — the tracker only builds bodies. */
+async function postAs(s, path, body) {
+  try {
+    const r = await fetch(`${base}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: s.job.api_key, ...body }) });
+    if (!r.ok) log(`${path} replied ${r.status}`);
+  } catch (e) { log(`${path} forward failed`, e.message); }
+}
 
 function connect(s) {
   if (s.stopped) return;
   const { username } = s.job;
   setStatus(s.job.user_id, "connecting", "");
+  try { s.tracker?.stop(); } catch {}
+  s.tracker = createBattleTracker({
+    username,
+    log: (m) => log(`@${username}`, m),
+    post: (body) => postAs(s, "/api/public/battle", body),
+    postLeague: (body) => postAs(s, "/api/public/league", body),
+  });
+  const tracker = s.tracker;
   const opts = { enableExtendedGiftInfo: false }; if (signApiKey) opts.signApiKey = signApiKey;
   const c = new TikTokLiveConnection(username, opts); s.conn = c;
-  c.connect().then(() => { log(`live @${username}`); setStatus(s.job.user_id, "live", ""); }).catch((err) => {
+  c.connect().then((state) => {
+    log(`live @${username}`);
+    const room = state?.roomInfo || c.roomInfo || {};
+    const owner = room?.owner?.id_str || room?.owner?.id || room?.owner_user_id || room?.data?.owner?.id_str || "";
+    tracker.setHostId(String(owner || ""));
+    tracker.setHostId(room);
+    setStatus(s.job.user_id, "live", "");
+  }).catch((err) => {
     const m = String(err?.message ?? err);
     const offline = /offline|not.*live|LIVE has ended|isn't online|UserOfflineError/i.test(m);
     setStatus(s.job.user_id, offline ? "waiting" : "error", offline ? "" : m.slice(0, 280));
@@ -74,6 +102,9 @@ function connect(s) {
   });
   c.on(WebcastEvent.FOLLOW, () => get(s, "/api/public/goal", { type: "follow", count: "1" }));
   c.on(WebcastEvent.SHARE, (d) => post(s, "/api/public/events", { type: "share", username: handleOf(d) }));
+  c.on(BATTLE, (m) => tracker.onBattleMessage(m));
+  c.on(ARMIES, (m) => tracker.onArmiesMessage(m));
+  c.on("decodedData", (type, data) => tracker.onDecoded(type, data));
 }
 
 async function tick() {
