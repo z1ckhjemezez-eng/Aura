@@ -147,23 +147,44 @@ function connect(s) {
     tracker.onDecoded(type, data);
     s.booster.setCreator(tracker.status().hostId);
     if (String(type) !== 'WebcastLinkMicBattleItemCard') s.booster.observe(String(type), data);
-    probeMessage(s, String(type), data);
+    probeMessage(s, String(type), data, raw);
   });
 }
 
-// Research capture: for 20 s after a power-up award, keep every non-chat message so we can learn whether TikTok names the card elsewhere.
+// Research capture: keep a rolling buffer of recent battle messages and, for 20 s after a power-up award, every
+// non-noise message — plus the raw protobuf bytes — so we can document exactly which card fields TikTok delivers.
 const PROBE_NOISE = /chat|gift|like|member|social|roomuserseq|roomrank|emote|envelope|subnotify|caption|barrage|hourlyrank|inroombanner/i;
 const PROBE_HINT = /card|booster|powerup|power_up|buff|prop|item_?info|bag/i;
-function probeMessage(s, type, data) {
+function rawBase64(raw) {
+  try {
+    const bytes = raw?.binary ?? raw?.data ?? raw?.payload;
+    const buf = Buffer.isBuffer(bytes) ? bytes : bytes instanceof Uint8Array ? Buffer.from(bytes) : null;
+    return buf && buf.length ? buf.toString("base64").slice(0, 40000) : null;
+  } catch { return null; }
+}
+function sendProbe(s, type, data, reason, raw) {
+  try {
+    const json = JSON.stringify(data ?? {}, (k, v) => typeof v === 'bigint' ? v.toString() : v);
+    if (json.length > 70000) return;
+    const body = { sessionId: null, sourceEvent: type, reason, payload: JSON.parse(json) };
+    const b64 = rawBase64(raw); if (b64) body.rawBase64 = b64;
+    fetch(`${base}/api/public/booster-probe`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': s.job.api_key }, body: JSON.stringify(body), signal: AbortSignal.timeout(10000) }).catch(() => {});
+  } catch {}
+}
+function probeMessage(s, type, data, raw) {
   try {
     const now = Date.now(), json = JSON.stringify(data ?? {}, (k, v) => typeof v === 'bigint' ? v.toString() : v);
-    if (type === 'WebcastLinkMicBattleItemCard' && /awardCardNotice/.test(json)) { s.probeUntil = now + 20_000; s.probeCount = 0; }
-    const inWindow = (s.probeUntil ?? 0) > now && !PROBE_NOISE.test(type);
-    const hinted = !PROBE_NOISE.test(type) && /battle|linkmic|match|card|prop/i.test(type) && PROBE_HINT.test(json) && type !== 'WebcastLinkMicBattleItemCard';
+    const noise = PROBE_NOISE.test(type);
+    if (!noise) { (s.probeRing = s.probeRing ?? []).push({ type, json, raw }); if (s.probeRing.length > 30) s.probeRing.shift(); }
+    if (type === 'WebcastLinkMicBattleItemCard' && /awardCardNotice/.test(json)) {
+      for (const prior of s.probeRing ?? []) sendProbe(s, prior.type, JSON.parse(prior.json), 'before_award', prior.raw);
+      s.probeRing = []; s.probeUntil = now + 20_000; s.probeCount = 0;
+    }
+    const inWindow = (s.probeUntil ?? 0) > now && !noise;
+    const hinted = !noise && /battle|linkmic|match|card|prop/i.test(type) && PROBE_HINT.test(json) && type !== 'WebcastLinkMicBattleItemCard';
     if (!inWindow && !hinted) return;
-    if ((s.probeCount = (s.probeCount ?? 0) + 1) > 60 || json.length > 120000) return;
-    fetch(`${base}/api/public/booster-probe`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': s.job.api_key },
-      body: JSON.stringify({ sessionId: null, sourceEvent: type, reason: inWindow ? 'after_award' : 'card_hint', payload: JSON.parse(json) }), signal: AbortSignal.timeout(10000) }).catch(() => {});
+    if ((s.probeCount = (s.probeCount ?? 0) + 1) > 60) return;
+    sendProbe(s, type, data, inWindow ? 'after_award' : 'card_hint', raw);
   } catch {}
 }
 
