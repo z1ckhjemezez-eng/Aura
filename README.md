@@ -28,15 +28,20 @@ A health endpoint answers on `$PORT` so the service also works as a Render web s
 ## Files
 
 - `worker.js` — connection pool, event forwarding, status reporting.
+- `connection-status.js` — open-socket and exact room-username verification. Offline is only confirmed by a typed offline error plus matching account identity; other lookup failures remain unverified, never connected.
 - `battle.js` — battle and league tracking (pure logic, no network calls).
 - `boosters.js` — existing-connection observer and disk-backed retry spool; no gift-ID detection. Admin mappings are evidence-gated. Top2/Top3 cards are not treated as x2/x3 multipliers; expiry stays unknown unless actual events establish it.
 - `battle.test.ts` — run from the project root: `bunx vitest run auratok-cloud-worker/battle.test.ts`.
 
 ## New version
 
-The download at `public/auratok-cloud-worker.zip` is packed from this folder:
+Battle MVP gifts now carry the sender's TikTok ID and the battle ID. Battle start, received gifts and end are delivered in order so the final ceremony includes the MVP's largest completed gift from that battle. Update AuraTok before redeploying this version.
+
+Update your existing Render service with **all** files, including `connection-status.js`, and redeploy. Publish the matching AuraTok update as well: status reports now include the saved username and request revision, and reports from older workers are intentionally ignored rather than showing an unverified connection.
+
+The download at `public/auratok-cloud-worker.zip` is packed from this folder (excluding tests):
 
 ```bash
 rm -f public/auratok-cloud-worker.zip
-zip -r -X public/auratok-cloud-worker.zip auratok-cloud-worker -x 'auratok-cloud-worker/battle.test.ts'
+zip -r -X public/auratok-cloud-worker.zip auratok-cloud-worker -x '*.test.ts' '*/node_modules/*' '*/.env*'
 ```

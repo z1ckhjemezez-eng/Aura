@@ -128,7 +128,7 @@ export function createBattleTracker(options = {}) {
   function applyArmies(battleId, armiesRaw, teamArmies) {
     if (!battleId) return;
     startBattle(String(battleId));
-    if (!battle) return;          // this battle already ended — late armies are ignored
+    if (!battle || battle.id !== String(battleId)) return; // Never mix a previous battle into the current one.
 
     const entries = Object.entries(toArmyMap(armiesRaw));
     let ours = null, oppScore = 0, oppId = null;
@@ -153,8 +153,9 @@ export function createBattleTracker(options = {}) {
     battle.our = Math.max(battle.our, num(ours.hostscore));
     battle.opp = Math.max(battle.opp, oppScore);
     for (const c of contributorsOf(ours)) {
-      const old = battle.contributors.get(c.username);
-      if (!old || c.points >= old.points) battle.contributors.set(c.username, c);
+      const identity = c.userId || c.username;
+      const old = battle.contributors.get(identity);
+      if (!old || c.points >= old.points) battle.contributors.set(identity, c);
     }
     scheduleUpdate();
   }
@@ -187,10 +188,10 @@ export function createBattleTracker(options = {}) {
       mode = mode || readMode(m);
       if (!opponent) opponent = findUser(m, null);
     }
-    if (m.action === ACTION_OPEN) startBattle(String(m.battleId));
-    if (m.action === ACTION_FINISH || m.action === ACTION_CUT_SHORT) endBattle(m.battleId);
+    if (m.action === ACTION_OPEN && m.battleId) startBattle(String(m.battleId));
     const map = toArmyMap(m.armies);
     if (m.teamArmies?.length || Object.keys(map).length) applyArmies(m.battleId, map, m.teamArmies);
+    if (m.action === ACTION_FINISH || m.action === ACTION_CUT_SHORT) endBattle(m.battleId);
   }
 
   function onArmiesMessage(m) {

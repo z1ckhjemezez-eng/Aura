@@ -2,9 +2,10 @@
 // who entered their username on AuraTok, and forwards events to the AuraTok API.
 // Battles (start/end, real team scores, opponent, contributors) and league
 // fragments are tracked here too, so a cloud connection needs no extra program.
-import { TikTokLiveConnection, WebcastEvent, ControlEvent } from "tiktok-live-connector";
+import { TikTokLiveConnection, WebcastEvent, ControlEvent, UserOfflineError } from "tiktok-live-connector";
 import { createBattleTracker } from "./battle.js";
 import { createBoosterCollector } from "./boosters.js";
+import { verifiedLive, connectionFailure } from './connection-status.js';
 
 const base = String(process.env.AURATOK_URL || "https://auratok.com").replace(/\/+$/, "");
 const secret = process.env.WORKER_SECRET || "";
@@ -14,7 +15,11 @@ const log = (...a) => console.log(new Date().toISOString(), ...a);
 
 const sessions = new Map(); // user_id -> session
 const pending = new Map();  // user_id -> {status,message}
-const setStatus = (id, status, message = "") => { const x = sessions.get(id); if (x) x.status = { user_id: id, status, message }; pending.set(id, { user_id: id, status, message }); };
+const setStatus = (id, status, message = "") => {
+  const x = sessions.get(id); if (!x || x.stopped) return;
+  x.status = { user_id: id, username: x.job.username, revision: x.job.revision, status, message };
+  pending.set(id, x.status);
+};
 
 async function api(method, body) {
   const r = await fetch(`${base}/api/public/cloud-worker`, { method, headers: { "Content-Type": "application/json", "x-worker-secret": secret }, body: body ? JSON.stringify(body) : undefined });
@@ -27,7 +32,7 @@ const BATTLE = WebcastEvent.LINK_MIC_BATTLE ?? "linkMicBattle";
 const ARMIES = WebcastEvent.LINK_MIC_ARMIES ?? "linkMicArmies";
 
 function start(job) {
-  const s = { job, conn: null, tracker: null, retryAt: 0, likeBuf: 0, likeTimer: null, stopped: false, booster: null };
+  const s = { job, conn: null, tracker: null, retryAt: 0, likeBuf: 0, likeTimer: null, stopped: false, booster: null, battleDelivery: Promise.resolve() };
   s.booster = createBoosterCollector({ spoolDir: `${process.env.BOOSTER_SPOOL_DIR || '/tmp/auratok-booster-spool'}/${job.user_id}`, post: async body => {
     const response = await fetch(`${base}/api/public/boosters`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': job.api_key }, body: JSON.stringify(body), signal: AbortSignal.timeout(15000) });
     if (!response.ok) throw new Error('Booster delivery failed');
@@ -41,7 +46,8 @@ function stop(id) {
   s.booster?.close();
   try { s.tracker?.stop(); } catch {}
   try { s.conn?.removeAllListeners(); s.conn?.disconnect(); } catch {}
-  sessions.delete(id); setStatus(id, "off", "");
+  if (s.likeTimer) clearTimeout(s.likeTimer);
+  sessions.delete(id); pending.delete(id);
 }
 async function get(s, path, params) {
   try { await fetch(`${base}${path}?${new URLSearchParams({ key: s.job.api_key, ...params })}`); } catch (e) { log("forward failed", e.message); }
@@ -57,8 +63,15 @@ async function postAs(s, path, body) {
   } catch (e) { log(`${path} forward failed`, e.message); }
 }
 
+// Preserve socket order: start persists before gifts; end waits for all received battle gifts.
+function deliverBattle(s, send) {
+  s.battleDelivery = s.battleDelivery.then(() => s.stopped ? undefined : send()).catch(() => log('Battle delivery failed'));
+  return s.battleDelivery;
+}
+
 function connect(s) {
   if (s.stopped) return;
+  s.booster.disconnected();
   const { username } = s.job;
   setStatus(s.job.user_id, "connecting", "");
   try { s.tracker?.stop(); } catch {}
@@ -66,7 +79,7 @@ function connect(s) {
   s.tracker = createBattleTracker({
     username,
     log: (m) => log(`@${username}`, m),
-    post: (body) => postAs(s, "/api/public/battle", body),
+    post: (body) => deliverBattle(s, () => postAs(s, "/api/public/battle", body)),
     postLeague: (body) => postAs(s, "/api/public/league", body),
   });
   const tracker = s.tracker;
@@ -74,6 +87,12 @@ function connect(s) {
   const c = new TikTokLiveConnection(username, opts); s.conn = c;
   c.connect().then((state) => {
     if (s.stopped || s.conn !== c) return;
+    if (!verifiedLive(username, c, state)) {
+      setStatus(s.job.user_id, 'error', 'TikTok account identity could not be confirmed. Not connected.');
+      s.retryAt = Date.now() + 120_000;
+      c.removeAllListeners(); void c.disconnect();
+      return;
+    }
     log(`live @${username}`);
     const room = state?.roomInfo || c.roomInfo || {};
     const owner = room?.owner?.id_str || room?.owner?.id || room?.owner_user_id || room?.data?.owner?.id_str || "";
@@ -83,12 +102,13 @@ function connect(s) {
     s.booster.connected();
     setStatus(s.job.user_id, "live", "");
   }).catch((err) => {
-    const m = String(err?.message ?? err);
-    const offline = /offline|not.*live|LIVE has ended|isn't online|UserOfflineError/i.test(m);
-    setStatus(s.job.user_id, offline ? "waiting" : "error", offline ? "" : m.slice(0, 280));
-    s.retryAt = Date.now() + (offline ? 60_000 : 120_000);
+    if (s.stopped || s.conn !== c) return;
+    s.booster.disconnected();
+    const result = connectionFailure(err, username, c.roomInfo, err instanceof UserOfflineError);
+    setStatus(s.job.user_id, result.status, result.message);
+    s.retryAt = Date.now() + result.retryMs;
   });
-  c.on(ControlEvent.DISCONNECTED, () => { if (!s.stopped && s.conn === c) { s.booster.disconnected(); setStatus(s.job.user_id, "waiting", ""); s.retryAt = Date.now() + 30_000; } });
+  c.on(ControlEvent.DISCONNECTED, () => { if (!s.stopped && s.conn === c) { s.booster.disconnected(); setStatus(s.job.user_id, "connecting", "LIVE disconnected. Reconnecting — not connected."); s.retryAt = Date.now() + 30_000; } });
   c.on(WebcastEvent.CHAT, (d) => {
     const msg = String(d.comment || "").trim(); if (!msg) return;
     get(s, "/api/public/chat", { user: handleOf(d), msg, avatar: avatarOf(d.user), isFollower: Number(d.user?.followRole ?? 0) >= 1 ? "1" : "0", isSubscriber: d.user?.isSubscriber ? "1" : "0", isModerator: d.user?.isModerator ? "1" : "0" });
@@ -100,12 +120,17 @@ function connect(s) {
     if (giftType === 1 && !repeatEnd) return;
     const qty = Math.max(1, Number(d.repeatCount || d.comboCount || 1));
     const per = d.diamondCount ?? g.diamondCount;
-    get(s, "/api/public/gift", {
+    const battleId = tracker.status().battleId;
+    const giftParams = {
       user: handleOf(d), nickname: d.user?.nickname || "", gift: d.giftName || g.name || g.giftName || "",
+      sender_user_id: String(d.user?.userId ?? d.user?.idStr ?? d.user?.id ?? d.userId ?? ''),
       gift_id: String(d.giftId ?? g.id ?? ""), quantity: String(qty), coins: String(Number(per ?? 1) * qty),
       diamonds: per !== undefined ? String(per) : "", avatar: avatarOf(d.user), event_id: String(d.msgId ?? d.common?.msgId ?? ""),
       gift_icon: d.giftPictureUrl || g.image?.urlList?.[0] || "", gift_type: String(giftType), repeat_end: repeatEnd ? "true" : "false",
-    });
+      ...(battleId ? { battleId } : {}),
+    };
+    if (battleId) deliverBattle(s, () => get(s, "/api/public/gift", giftParams));
+    else get(s, "/api/public/gift", giftParams);
   });
   c.on(WebcastEvent.LIKE, (d) => {
     s.likeBuf += Number(d.likeCount || 1); if (s.likeTimer) return;
@@ -115,29 +140,62 @@ function connect(s) {
   c.on(WebcastEvent.SHARE, (d) => post(s, "/api/public/events", { type: "share", username: handleOf(d) }));
   c.on(BATTLE, (m) => tracker.onBattleMessage(m));
   c.on(ARMIES, (m) => tracker.onArmiesMessage(m));
-  c.on(WebcastEvent.LINK_MIC_BATTLE_ITEM_CARD ?? 'linkMicBattleItemCard', m => { s.booster.setCreator(tracker.status().hostId); s.booster.observe('WebcastLinkMicBattleItemCard', m); });
+  c.on(WebcastEvent.LINK_MIC_BATTLE_ITEM_CARD ?? 'linkMicBattleItemCard', m => { s.booster.setCreator(tracker.status().hostId); s.booster.observe('WebcastLinkMicBattleItemCard', m); probeMessage(s, 'WebcastLinkMicBattleItemCard', m); });
   c.on("decodedData", (raw, decoded) => {
     const type = decoded?.type ?? raw?.type ?? raw;
     const data = decoded?.data ?? decoded ?? raw?.data;
     tracker.onDecoded(type, data);
     s.booster.setCreator(tracker.status().hostId);
     if (String(type) !== 'WebcastLinkMicBattleItemCard') s.booster.observe(String(type), data);
+    probeMessage(s, String(type), data);
   });
 }
 
+// Research capture: for 20 s after a power-up award, keep every non-chat message so we can learn whether TikTok names the card elsewhere.
+const PROBE_NOISE = /chat|gift|like|member|social|roomuserseq|roomrank|emote|envelope|subnotify|caption|barrage|hourlyrank|inroombanner/i;
+const PROBE_HINT = /card|booster|powerup|power_up|buff|prop|item_?info|bag/i;
+function probeMessage(s, type, data) {
+  try {
+    const now = Date.now(), json = JSON.stringify(data ?? {}, (k, v) => typeof v === 'bigint' ? v.toString() : v);
+    if (type === 'WebcastLinkMicBattleItemCard' && /awardCardNotice/.test(json)) { s.probeUntil = now + 20_000; s.probeCount = 0; }
+    const inWindow = (s.probeUntil ?? 0) > now && !PROBE_NOISE.test(type);
+    const hinted = !PROBE_NOISE.test(type) && /battle|linkmic|match|card|prop/i.test(type) && PROBE_HINT.test(json) && type !== 'WebcastLinkMicBattleItemCard';
+    if (!inWindow && !hinted) return;
+    if ((s.probeCount = (s.probeCount ?? 0) + 1) > 60 || json.length > 120000) return;
+    fetch(`${base}/api/public/booster-probe`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': s.job.api_key },
+      body: JSON.stringify({ sessionId: null, sourceEvent: type, reason: inWindow ? 'after_award' : 'card_hint', payload: JSON.parse(json) }), signal: AbortSignal.timeout(10000) }).catch(() => {});
+  } catch {}
+}
+
+let ticking = false;
 async function tick() {
+  if (ticking) return; ticking = true;
+  try {
   try {
     const { jobs } = await api("GET");
     const want = new Map(jobs.map((j) => [j.user_id, j]));
     for (const id of [...sessions.keys()]) {
       const j = want.get(id), s = sessions.get(id);
-      if (!j || j.username !== s.job.username || j.api_key !== s.job.api_key) stop(id);
+      if (!j || j.username !== s.job.username || j.api_key !== s.job.api_key || j.revision !== s.job.revision) stop(id);
     }
     for (const j of jobs) if (!sessions.has(j.user_id)) start(j);
     for (const s of sessions.values()) if (s.retryAt && Date.now() >= s.retryAt) { s.retryAt = 0; try { s.conn?.disconnect(); } catch {} connect(s); }
   } catch (e) { log("tick failed", e.message); }
-  for (const x of sessions.values()) if (x.status && !pending.has(x.job.user_id)) pending.set(x.job.user_id, x.status);
-  if (pending.size) { const statuses = [...pending.values()]; pending.clear(); api("POST", { statuses }).catch((e) => log("status failed", e.message)); }
+  for (const x of sessions.values()) {
+    if (x.status?.status === 'live' && !x.conn?.isConnected) {
+      x.booster.disconnected(); setStatus(x.job.user_id, 'connecting', 'LIVE disconnected. Reconnecting — not connected.');
+      x.retryAt ||= Date.now() + 30_000;
+    }
+    if (x.status && !pending.has(x.job.user_id)) pending.set(x.job.user_id, x.status);
+  }
+  if (pending.size) {
+    const statuses = [...pending.values()];
+    try {
+      await api("POST", { statuses });
+      for (const report of statuses) if (pending.get(report.user_id) === report) pending.delete(report.user_id);
+    } catch (e) { log('status failed', e.message); }
+  }
+  } finally { ticking = false; }
 }
 log(`AuraTok Cloud Worker → ${base}`);
 tick(); setInterval(tick, 20_000);
