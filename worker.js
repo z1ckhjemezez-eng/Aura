@@ -151,12 +151,12 @@ function connect(s) {
     s.retryAt = Date.now() + result.retryMs;
   });
   c.on(ControlEvent.DISCONNECTED, () => { if (!s.stopped && s.conn === c) { s.gate.cancel(); s.booster.disconnected(); setStatus(s.job.user_id, "connecting", "LIVE disconnected. Reconnecting — not connected."); s.retryAt = Date.now() + 30_000; } });
-  c.on(WebcastEvent.CHAT, (d) => {
+  c.on(WebcastEvent.CHAT, (d) => { seeViewer(d?.user);
     const msg = String(d.comment || "").trim(); if (!msg) return;
     get(s, "/api/public/chat", { user: handleOf(d), msg, event_id: String(d.msgId ?? d.common?.msgId ?? ""), avatar: avatarOf(d.user), isFollower: Number(d.user?.followRole ?? 0) >= 1 ? "1" : "0", isSubscriber: d.user?.isSubscriber ? "1" : "0", isModerator: d.user?.isModerator ? "1" : "0" });
   });
   c.on(WebcastEvent.BARRAGE??'barrage',d=>{if(s.stopped||s.conn!==c||!c.isConnected)return;s.levelSnaps.noteBarrage(d?.msgType);const body=normalizeLevelBarrage(d,c.roomId??s.roomId,log);if(body)void s.levels?.enqueue(body);});
-  c.on(WebcastEvent.GIFT, (d) => {
+  c.on(WebcastEvent.GIFT, (d) => { seeViewer(d?.user);
     const g = d.giftDetails || d.gift || {};
     const giftType = Number(d.giftType ?? g.type ?? g.giftType ?? 0);
     const repeatEnd = d.repeatEnd === true || Number(d.repeatEnd) === 1;
@@ -175,12 +175,13 @@ function connect(s) {
     if (battleId) deliverBattle(s, () => get(s, "/api/public/gift", giftParams));
     else get(s, "/api/public/gift", giftParams);
   });
-  c.on(WebcastEvent.LIKE, (d) => {
+  c.on(WebcastEvent.LIKE, (d) => { seeViewer(d?.user);
     const eventId = String(d.msgId ?? d.common?.msgId ?? "");
     if (eventId) post(s, "/api/public/events", { type: "like", username: handleOf(d), likes: Number(d.likeCount || 1), event_id: eventId });
     s.likeBuf += Number(d.likeCount || 1); if (s.likeTimer) return;
     s.likeTimer = setTimeout(() => { s.likeTimer = null; const n = s.likeBuf; s.likeBuf = 0; get(s, "/api/public/goal", { type: "like", count: String(n) }); }, 3000);
   });
+  c.on(WebcastEvent.MEMBER ?? 'member', (d) => seeViewer(d?.user));
   c.on(WebcastEvent.FOLLOW, (d) => get(s, "/api/public/goal", { type: "follow", count: "1", user: handleOf(d), event_id: String(d.msgId ?? d.common?.msgId ?? "") }));
   c.on(WebcastEvent.SHARE, (d) => post(s, "/api/public/events", { type: "share", username: handleOf(d), event_id: String(d.msgId ?? d.common?.msgId ?? "") }));
   c.on(BATTLE, (m) => tracker.onBattleMessage(m));
@@ -190,11 +191,20 @@ function connect(s) {
     const type = decoded?.type ?? raw?.type ?? raw;
     const data = decoded?.data ?? decoded ?? raw?.data;
     tracker.onDecoded(type, data);
-    if (!s.stopped && s.conn === c && c.isConnected && s.roomId && data?.user) {
-      const u = data.user;
+    if (data?.user) seeViewer(data.user);
+  });
+  const seeViewer = (u) => {
+    if (!s.stopped && s.conn === c && c.isConnected && s.roomId && u && !(s.lastSeen === u)) {
+      s.lastSeen = u;
       if (!s.hostId && String(u.uniqueId || u.displayId || '').toLowerCase() === username.toLowerCase()) s.hostId = [u.userId, u.idStr, u.id].map(v => String(v ?? '')).find(v => /^\d{5,30}$/.test(v)) || null;
       for (const body of s.levelSnaps.observe(u, s.roomId, tracker.status().hostId || s.hostId)) void s.levels?.enqueue(body);
     }
+  };
+  c.on("decodedData", (raw, decoded) => {
+    const type = decoded?.type ?? raw?.type ?? raw;
+    const data = decoded?.data ?? decoded ?? raw?.data;
+    tracker.onDecoded(type, data);
+    if (data?.user) seeViewer(data.user);
     s.booster.setCreator(tracker.status().hostId);
     if (String(type) !== 'WebcastLinkMicBattleItemCard') s.booster.observe(String(type), data);
     probeMessage(s, String(type), data, raw);

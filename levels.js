@@ -48,8 +48,8 @@ export function createLevelSnapshots({log=()=>{}}={}){
   setRoom(r){if(String(r)!==room){room=String(r);seen.clear();}},
   observe(u,roomId,hostId){
    const out=[];if(!u||typeof u!=='object'||!/^\d{5,30}$/.test(String(roomId??'')))return out;
-   const id=identity(u);if(!id)return out;
-   bump('viewers_seen');
+   bump('messages_with_viewer');const id=identity(u);if(!id){bump('viewer_without_id');return out;}
+   bump('viewers_seen');for(const b of Array.isArray(u.badgeList)?u.badgeList:[])bump(`badge_scene_${Number(b?.badgeSceneType)||0}`);
    // TikTok's room badges: scene 8 = user grade, scene 10 = this room's fan club (shown only in its creator's LIVE).
    const badge=scene=>{for(const b of Array.isArray(u.badgeList)?u.badgeList:[]){if(Number(b?.badgeSceneType)!==scene)continue;const l=Number(b?.privilegeLogExtra?.level??b?.combine?.str??0);if(Number.isInteger(l)&&l>0)return l;}return 0;};
    const club=u.fansClub?.data;let fan=Number(club?.level);const anchor=String(club?.anchorId??'').trim();
