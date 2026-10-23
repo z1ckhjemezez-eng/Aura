@@ -8,6 +8,7 @@ import { createBoosterCollector } from "./boosters.js";
 import { verifiedLive, connectionFailure, ownerObserved } from './connection-status.js';
 import { createLiveGate } from './live-session.js';
 import { normalizeLevelBarrage,createLevelDelivery } from './levels.js';
+import { WORKER_BUILD } from './build-info.js';
 
 const base = String(process.env.AURATOK_URL || "https://auratok.com").replace(/\/+$/, "");
 const secret = process.env.WORKER_SECRET || "";
@@ -151,7 +152,7 @@ function connect(s) {
     const msg = String(d.comment || "").trim(); if (!msg) return;
     get(s, "/api/public/chat", { user: handleOf(d), msg, event_id: String(d.msgId ?? d.common?.msgId ?? ""), avatar: avatarOf(d.user), isFollower: Number(d.user?.followRole ?? 0) >= 1 ? "1" : "0", isSubscriber: d.user?.isSubscriber ? "1" : "0", isModerator: d.user?.isModerator ? "1" : "0" });
   });
-  c.on(WebcastEvent.BARRAGE??'barrage',d=>{if(s.stopped||s.conn!==c||!c.isConnected)return;const body=normalizeLevelBarrage(d,s.roomId);if(body)void s.levels?.enqueue(body);});
+  c.on(WebcastEvent.BARRAGE??'barrage',d=>{if(s.stopped||s.conn!==c||!c.isConnected)return;const body=normalizeLevelBarrage(d,c.roomId??s.roomId,log);if(body)void s.levels?.enqueue(body);});
   c.on(WebcastEvent.GIFT, (d) => {
     const g = d.giftDetails || d.gift || {};
     const giftType = Number(d.giftType ?? g.type ?? g.giftType ?? 0);
@@ -259,7 +260,7 @@ async function tick() {
   }
   } finally { ticking = false; }
 }
-log(`AuraTok Cloud Worker → ${base}`);
+log(`AuraTok Cloud Worker build ${WORKER_BUILD} → ${base}`);
 tick(); setInterval(tick, 20_000);
 // tiny health server so it can also run as a Render web service
 import("node:http").then(({ createServer }) => { if (process.env.PORT) createServer((_, r) => r.end("ok")).listen(process.env.PORT); });

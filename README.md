@@ -37,6 +37,12 @@ A health endpoint answers on `$PORT` so the service also works as a Render web s
 
 ## New version
 
+### AuraLevel diagnostic build `2026.10.23-levels.2`
+
+Render → **Aura** → **Logs** must show `AuraTok Cloud Worker build 2026.10.23-levels.2` after deploying the complete package. The old `1.0.0` package value and a green LIVE connection do not establish which code is running.
+During a genuine upgrade, look for `AuraLevel native fan accepted` or `AuraLevel native gifter accepted`, followed by `AuraLevel delivery HTTP 200`. Rejected events log only a category; no usernames, IDs, API keys or raw payloads. HTTP failure keeps the event for retry.
+This build fixes an empty protobuf user-grade ID masking a valid nested sender ID and rejects zero placeholder identities. It remains unverified with a real TikTok upgrade until the deployed logs and AuraLevel history agree.
+
 Every confirmed TikTok room is initialized in AuraTok before its events are forwarded. A new room clears LIVE counters/queues; reconnects and worker restarts keep the same session. Publish AuraTok first, then redeploy this entire folder on Render, including `live-session.js`. Existing overlay URLs stay valid. The first observed room after upgrading starts a clean session. Settings, historical events, rolling King totals, league progress and Spotify remain intact.
 
 Battle MVP gifts now carry the sender's TikTok ID and the battle ID. Battle start, received gifts and end are delivered in order so the final ceremony includes the MVP's largest completed gift from that battle. Update AuraTok before redeploying this version.
