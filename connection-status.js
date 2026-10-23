@@ -12,5 +12,7 @@ export function connectionFailure(error, username, room, isOffline) {
   if (isOffline && roomUsername(room) === username.toLowerCase()) {
     return { status: 'waiting', message: 'Account found. Not LIVE — not connected.', retryMs: 60_000 };
   }
+  // TikTok often omits room data for offline creators; a typed offline error is not a failure.
+  if (isOffline) return { status: 'waiting', message: 'Not LIVE right now. Connects automatically when you go LIVE.', retryMs: 60_000 };
   return { status: 'error', message: 'Could not verify this TikTok username or connect. Check the exact @username and try again when LIVE.', retryMs: 120_000 };
 }

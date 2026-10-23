@@ -104,6 +104,7 @@ function connect(s) {
   }).catch((err) => {
     if (s.stopped || s.conn !== c) return;
     s.booster.disconnected();
+    log(`@${username} connect failed:`, err?.constructor?.name, String(err?.message ?? err).slice(0, 200));
     const result = connectionFailure(err, username, c.roomInfo, err instanceof UserOfflineError);
     setStatus(s.job.user_id, result.status, result.message);
     s.retryAt = Date.now() + result.retryMs;
