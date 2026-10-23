@@ -1,6 +1,13 @@
 // Only observed room identity and an open socket can confirm the requested creator.
+export function roomOwner(room) {
+  return room?.data?.owner ?? room?.owner ?? room?.data?.user ?? room?.user ?? null;
+}
+// TikTok sometimes answers connect() with a truncated room payload (no owner at all).
+export function ownerObserved(room) {
+  return roomOwner(room) != null;
+}
 export function roomUsername(room) {
-  const owner = room?.data?.owner ?? room?.owner ?? room?.data?.user ?? room?.user;
+  const owner = roomOwner(room);
   const name = owner?.unique_id ?? owner?.uniqueId ?? owner?.display_id ?? owner?.displayId;
   return typeof name === 'string' ? name.trim().replace(/^@/, '').toLowerCase() : '';
 }

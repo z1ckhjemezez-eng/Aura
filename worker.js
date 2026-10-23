@@ -5,7 +5,7 @@
 import { TikTokLiveConnection, WebcastEvent, ControlEvent, UserOfflineError } from "tiktok-live-connector";
 import { createBattleTracker } from "./battle.js";
 import { createBoosterCollector } from "./boosters.js";
-import { verifiedLive, connectionFailure } from './connection-status.js';
+import { verifiedLive, connectionFailure, ownerObserved } from './connection-status.js';
 
 const base = String(process.env.AURATOK_URL || "https://auratok.com").replace(/\/+$/, "");
 const secret = process.env.WORKER_SECRET || "";
@@ -88,11 +88,24 @@ function connect(s) {
   c.connect().then((state) => {
     if (s.stopped || s.conn !== c) return;
     if (!verifiedLive(username, c, state)) {
-      setStatus(s.job.user_id, 'error', 'TikTok account identity could not be confirmed. Not connected.');
-      s.retryAt = Date.now() + 120_000;
-      c.removeAllListeners(); void c.disconnect();
-      return;
+      if (ownerObserved(state?.roomInfo ?? c.roomInfo)) {
+        setStatus(s.job.user_id, 'error', 'TikTok account identity could not be confirmed. Not connected.');
+        s.retryAt = Date.now() + 120_000;
+        c.removeAllListeners(); void c.disconnect();
+        return;
+      }
+      // TikTok resolved connect() for this exact username to a live room but omitted owner
+      // details from the payload. Retry once for the full payload, then accept the connect
+      // resolution itself as the observed identity (connect throws for offline/unknown users).
+      if ((s.identityRetries = (s.identityRetries ?? 0) + 1) <= 1) {
+        setStatus(s.job.user_id, 'connecting', 'Confirming the TikTok account — retrying. Not connected yet.');
+        s.retryAt = Date.now() + 15_000;
+        c.removeAllListeners(); void c.disconnect();
+        return;
+      }
+      log(`live @${username} (owner details omitted by TikTok; identity accepted from connect resolution)`);
     }
+    s.identityRetries = 0;
     log(`live @${username}`);
     const room = state?.roomInfo || c.roomInfo || {};
     const owner = room?.owner?.id_str || room?.owner?.id || room?.owner_user_id || room?.data?.owner?.id_str || "";
