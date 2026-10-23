@@ -6,6 +6,8 @@ import { TikTokLiveConnection, WebcastEvent, ControlEvent, UserOfflineError } fr
 import { createBattleTracker } from "./battle.js";
 import { createBoosterCollector } from "./boosters.js";
 import { verifiedLive, connectionFailure, ownerObserved } from './connection-status.js';
+import { createLiveGate } from './live-session.js';
+import { normalizeLevelBarrage,createLevelDelivery } from './levels.js';
 
 const base = String(process.env.AURATOK_URL || "https://auratok.com").replace(/\/+$/, "");
 const secret = process.env.WORKER_SECRET || "";
@@ -32,7 +34,8 @@ const BATTLE = WebcastEvent.LINK_MIC_BATTLE ?? "linkMicBattle";
 const ARMIES = WebcastEvent.LINK_MIC_ARMIES ?? "linkMicArmies";
 
 function start(job) {
-  const s = { job, conn: null, tracker: null, retryAt: 0, likeBuf: 0, likeTimer: null, stopped: false, booster: null, battleDelivery: Promise.resolve() };
+  const s = { job, conn: null, tracker: null, retryAt: 0, likeBuf: 0, likeTimer: null, stopped: false, booster: null, battleDelivery: Promise.resolve(), gate: createLiveGate(), inFlight: new Set(), levels:null, roomId:null };
+  s.levels=createLevelDelivery({directory:`${process.env.LEVEL_SPOOL_DIR||'/tmp/auratok-level-spool'}/${job.user_id}`,log,send:async body=>{if(s.stopped||!await s.gate.wait())return 503;const r=await fetch(`${base}/api/public/events`,{method:'POST',headers:{'Content-Type':'application/json','x-api-key':job.api_key},body:JSON.stringify(body),signal:AbortSignal.timeout(15000)});return r.status;}});
   s.booster = createBoosterCollector({ spoolDir: `${process.env.BOOSTER_SPOOL_DIR || '/tmp/auratok-booster-spool'}/${job.user_id}`, post: async body => {
     const response = await fetch(`${base}/api/public/boosters`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': job.api_key }, body: JSON.stringify(body), signal: AbortSignal.timeout(15000) });
     if (!response.ok) throw new Error('Booster delivery failed');
@@ -43,34 +46,44 @@ function start(job) {
 function stop(id) {
   const s = sessions.get(id); if (!s) return;
   s.stopped = true; try { s.conn?.disconnect(); } catch {}
+  s.gate.cancel();
   s.booster?.close();
+  s.levels?.close();
   try { s.tracker?.stop(); } catch {}
   try { s.conn?.removeAllListeners(); s.conn?.disconnect(); } catch {}
   if (s.likeTimer) clearTimeout(s.likeTimer);
   sessions.delete(id); pending.delete(id);
 }
 async function get(s, path, params) {
-  try { await fetch(`${base}${path}?${new URLSearchParams({ key: s.job.api_key, ...params })}`); } catch (e) { log("forward failed", e.message); }
+  return forward(s, () => fetch(`${base}${path}?${new URLSearchParams({ key: s.job.api_key, ...params })}`));
 }
 async function post(s, path, body) {
-  try { await fetch(`${base}${path}`, { method: "POST", headers: { "Content-Type": "application/json", "x-api-key": s.job.api_key }, body: JSON.stringify(body) }); } catch (e) { log("forward failed", e.message); }
+  return forward(s, () => fetch(`${base}${path}`, { method: "POST", headers: { "Content-Type": "application/json", "x-api-key": s.job.api_key }, body: JSON.stringify(body) }));
+}
+async function forward(s, send) {
+  if (s.stopped || !await s.gate.wait()) return;
+  const task = send(); s.inFlight.add(task);
+  try { const r = await task; if (!r.ok) log(`Event delivery replied ${r.status}`); }
+  catch { log('Event delivery failed'); }
+  finally { s.inFlight.delete(task); }
 }
 /** Battle/league endpoints read the creator key from the payload — the tracker only builds bodies. */
 async function postAs(s, path, body) {
-  try {
-    const r = await fetch(`${base}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: s.job.api_key, ...body }) });
-    if (!r.ok) log(`${path} replied ${r.status}`);
-  } catch (e) { log(`${path} forward failed`, e.message); }
+  return forward(s, () => fetch(`${base}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: s.job.api_key, ...body }) }));
 }
 
 // Preserve socket order: start persists before gifts; end waits for all received battle gifts.
 function deliverBattle(s, send) {
-  s.battleDelivery = s.battleDelivery.then(() => s.stopped ? undefined : send()).catch(() => log('Battle delivery failed'));
+  const token = s.gate.token();
+  s.battleDelivery = s.battleDelivery.then(async () => s.stopped || !await s.gate.wait(token) ? undefined : send()).catch(() => log('Battle delivery failed'));
   return s.battleDelivery;
 }
 
 function connect(s) {
   if (s.stopped) return;
+  const attempt = s.gate.begin();
+  if (s.likeTimer) clearTimeout(s.likeTimer);
+  s.likeTimer = null; s.likeBuf = 0;
   s.booster.disconnected();
   const { username } = s.job;
   setStatus(s.job.user_id, "connecting", "");
@@ -85,10 +98,11 @@ function connect(s) {
   const tracker = s.tracker;
   const opts = { enableExtendedGiftInfo: false }; if (signApiKey) opts.signApiKey = signApiKey;
   const c = new TikTokLiveConnection(username, opts); s.conn = c;
-  c.connect().then((state) => {
+  c.connect().then(async (state) => {
     if (s.stopped || s.conn !== c) return;
     if (!verifiedLive(username, c, state)) {
       if (ownerObserved(state?.roomInfo ?? c.roomInfo)) {
+        s.gate.cancel();
         setStatus(s.job.user_id, 'error', 'TikTok account identity could not be confirmed. Not connected.');
         s.retryAt = Date.now() + 120_000;
         c.removeAllListeners(); void c.disconnect();
@@ -98,6 +112,7 @@ function connect(s) {
       // details from the payload. Retry once for the full payload, then accept the connect
       // resolution itself as the observed identity (connect throws for offline/unknown users).
       if ((s.identityRetries = (s.identityRetries ?? 0) + 1) <= 1) {
+        s.gate.cancel();
         setStatus(s.job.user_id, 'connecting', 'Confirming the TikTok account — retrying. Not connected yet.');
         s.retryAt = Date.now() + 15_000;
         c.removeAllListeners(); void c.disconnect();
@@ -106,6 +121,14 @@ function connect(s) {
       log(`live @${username} (owner details omitted by TikTok; identity accepted from connect resolution)`);
     }
     s.identityRetries = 0;
+    if (!c.isConnected || !state?.roomId) throw new Error('LIVE room is not open');
+    await Promise.allSettled([...s.inFlight]);
+    if (s.stopped || s.conn !== c || !c.isConnected) return;
+    await api('POST', { beginLive: { user_id: s.job.user_id, room_id: String(state.roomId), username, revision: s.job.revision } });
+    if (s.stopped || s.conn !== c || !c.isConnected) return;
+    s.gate.confirm(attempt);
+    s.roomId=String(state?.roomId??c.roomId??'');
+    s.levels?.setRoom(s.roomId);
     log(`live @${username}`);
     const room = state?.roomInfo || c.roomInfo || {};
     const owner = room?.owner?.id_str || room?.owner?.id || room?.owner_user_id || room?.data?.owner?.id_str || "";
@@ -116,17 +139,19 @@ function connect(s) {
     setStatus(s.job.user_id, "live", "");
   }).catch((err) => {
     if (s.stopped || s.conn !== c) return;
+    s.gate.cancel();
     s.booster.disconnected();
     log(`@${username} connect failed:`, err?.constructor?.name, String(err?.message ?? err).slice(0, 200));
     const result = connectionFailure(err, username, c.roomInfo, err instanceof UserOfflineError);
     setStatus(s.job.user_id, result.status, result.message);
     s.retryAt = Date.now() + result.retryMs;
   });
-  c.on(ControlEvent.DISCONNECTED, () => { if (!s.stopped && s.conn === c) { s.booster.disconnected(); setStatus(s.job.user_id, "connecting", "LIVE disconnected. Reconnecting — not connected."); s.retryAt = Date.now() + 30_000; } });
+  c.on(ControlEvent.DISCONNECTED, () => { if (!s.stopped && s.conn === c) { s.gate.cancel(); s.booster.disconnected(); setStatus(s.job.user_id, "connecting", "LIVE disconnected. Reconnecting — not connected."); s.retryAt = Date.now() + 30_000; } });
   c.on(WebcastEvent.CHAT, (d) => {
     const msg = String(d.comment || "").trim(); if (!msg) return;
-    get(s, "/api/public/chat", { user: handleOf(d), msg, avatar: avatarOf(d.user), isFollower: Number(d.user?.followRole ?? 0) >= 1 ? "1" : "0", isSubscriber: d.user?.isSubscriber ? "1" : "0", isModerator: d.user?.isModerator ? "1" : "0" });
+    get(s, "/api/public/chat", { user: handleOf(d), msg, event_id: String(d.msgId ?? d.common?.msgId ?? ""), avatar: avatarOf(d.user), isFollower: Number(d.user?.followRole ?? 0) >= 1 ? "1" : "0", isSubscriber: d.user?.isSubscriber ? "1" : "0", isModerator: d.user?.isModerator ? "1" : "0" });
   });
+  c.on(WebcastEvent.BARRAGE??'barrage',d=>{if(s.stopped||s.conn!==c||!c.isConnected)return;const body=normalizeLevelBarrage(d,s.roomId);if(body)void s.levels?.enqueue(body);});
   c.on(WebcastEvent.GIFT, (d) => {
     const g = d.giftDetails || d.gift || {};
     const giftType = Number(d.giftType ?? g.type ?? g.giftType ?? 0);
@@ -147,11 +172,13 @@ function connect(s) {
     else get(s, "/api/public/gift", giftParams);
   });
   c.on(WebcastEvent.LIKE, (d) => {
+    const eventId = String(d.msgId ?? d.common?.msgId ?? "");
+    if (eventId) post(s, "/api/public/events", { type: "like", username: handleOf(d), likes: Number(d.likeCount || 1), event_id: eventId });
     s.likeBuf += Number(d.likeCount || 1); if (s.likeTimer) return;
     s.likeTimer = setTimeout(() => { s.likeTimer = null; const n = s.likeBuf; s.likeBuf = 0; get(s, "/api/public/goal", { type: "like", count: String(n) }); }, 3000);
   });
-  c.on(WebcastEvent.FOLLOW, () => get(s, "/api/public/goal", { type: "follow", count: "1" }));
-  c.on(WebcastEvent.SHARE, (d) => post(s, "/api/public/events", { type: "share", username: handleOf(d) }));
+  c.on(WebcastEvent.FOLLOW, (d) => get(s, "/api/public/goal", { type: "follow", count: "1", user: handleOf(d), event_id: String(d.msgId ?? d.common?.msgId ?? "") }));
+  c.on(WebcastEvent.SHARE, (d) => post(s, "/api/public/events", { type: "share", username: handleOf(d), event_id: String(d.msgId ?? d.common?.msgId ?? "") }));
   c.on(BATTLE, (m) => tracker.onBattleMessage(m));
   c.on(ARMIES, (m) => tracker.onArmiesMessage(m));
   c.on(WebcastEvent.LINK_MIC_BATTLE_ITEM_CARD ?? 'linkMicBattleItemCard', m => { s.booster.setCreator(tracker.status().hostId); s.booster.observe('WebcastLinkMicBattleItemCard', m); probeMessage(s, 'WebcastLinkMicBattleItemCard', m); });

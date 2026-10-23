@@ -6,6 +6,7 @@ Keeps TikTok LIVE connections open for every creator who entered their username 
 - chat, gifts, likes, follows, shares
 - battles: start, end, real team scores, opponent name/picture and contributors (`/api/public/battle`)
 - league fragments when TikTok sends them (`/api/public/league`)
+- AuraLevel native barrage upgrades (fan type 10 / user-grade type 8) on the existing socket. Entrances 9/11 and subscriptions never invent upgrades. LIVE delivery remains unverified until captured.
 - Booster Collection: item-card notices, separate awards/use events, unknown battle power-ups and gap/heartbeat tracking (`/api/public/boosters`). No types are LIVE-verified yet.
 
 Because battles are read here, a cloud connection needs **no** extra program on a PC.
@@ -21,6 +22,7 @@ AuraTok ignores duplicate battle data.
    - `AURATOK_URL` — `https://auratok.com` (or your preview URL while testing).
    - `SIGN_API_KEY` — optional.
    - `BOOSTER_SPOOL_DIR` — optional persistent disk folder; without a mounted disk pending retries survive reconnects/process restarts on the same filesystem only, not a Render replacement/deploy. Sessions always start incomplete because observation can begin mid-LIVE.
+   - `LEVEL_SPOOL_DIR` — persistent disk folder for AuraLevel retries; `/tmp/auratok-level-spool` is the default and does not survive Render replacement/deploy. Old-room events are retained but never delivered into a new LIVE.
 4. Deploy. The worker polls AuraTok every 20 seconds and reports each connection's status.
 
 A health endpoint answers on `$PORT` so the service also works as a Render web service.
@@ -34,6 +36,8 @@ A health endpoint answers on `$PORT` so the service also works as a Render web s
 - `battle.test.ts` — run from the project root: `bunx vitest run auratok-cloud-worker/battle.test.ts`.
 
 ## New version
+
+Every confirmed TikTok room is initialized in AuraTok before its events are forwarded. A new room clears LIVE counters/queues; reconnects and worker restarts keep the same session. Publish AuraTok first, then redeploy this entire folder on Render, including `live-session.js`. Existing overlay URLs stay valid. The first observed room after upgrading starts a clean session. Settings, historical events, rolling King totals, league progress and Spotify remain intact.
 
 Battle MVP gifts now carry the sender's TikTok ID and the battle ID. Battle start, received gifts and end are delivered in order so the final ceremony includes the MVP's largest completed gift from that battle. Update AuraTok before redeploying this version.
 
