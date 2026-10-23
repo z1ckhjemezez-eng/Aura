@@ -135,7 +135,11 @@ export function createBattleTracker(options = {}) {
     for (const [key, a] of entries) {
       const id = String(a?.anchorIdStr || key);
       if (hostId && (id === hostId || key === hostId)) ours = a;
-      else if (num(a?.hostscore) >= oppScore) { oppScore = num(a?.hostscore); oppId = id; }
+      else {
+        // Sky/fog hides the opponent total for the host: fall back to the sum of their visible supporters.
+        const visible = num(a?.hostscore) || (a?.userArmies ?? []).reduce((t, u) => t + num(u?.score), 0);
+        if (visible >= oppScore) { oppScore = visible; oppId = id; }
+      }
     }
     if (!opponent && oppId && lastBattleMsg) opponent = findUser(lastBattleMsg, oppId);
     // Team (2v2) battles: use the team that contains our host.
@@ -146,12 +150,11 @@ export function createBattleTracker(options = {}) {
         else oppScore = Math.max(oppScore, num(t?.teamTotalScore));
       }
     }
-    if (!ours) {
-      if (!hostId) log("unknown TikTok id — cannot tell which side is ours");
-      return;
-    }
-    battle.our = Math.max(battle.our, num(ours.hostscore));
+    if (!ours && !hostId) { log("unknown TikTok id — cannot tell which side is ours"); return; }
+    // Keep the score card alive even when one side is hidden (Sky): scores never drop, missing sides keep their last value.
     battle.opp = Math.max(battle.opp, oppScore);
+    if (!ours) { scheduleUpdate(); return; }
+    battle.our = Math.max(battle.our, num(ours.hostscore) || contributorsOf(ours).reduce((t, c) => t + c.points, 0));
     for (const c of contributorsOf(ours)) {
       const identity = c.userId || c.username;
       const old = battle.contributors.get(identity);
