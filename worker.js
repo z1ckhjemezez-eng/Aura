@@ -7,7 +7,7 @@ import { createBattleTracker } from "./battle.js";
 import { createBoosterCollector } from "./boosters.js";
 import { verifiedLive, connectionFailure, ownerObserved } from './connection-status.js';
 import { createLiveGate } from './live-session.js';
-import { normalizeLevelBarrage,createLevelDelivery } from './levels.js';
+import { normalizeLevelBarrage,createLevelDelivery,createLevelSnapshots } from './levels.js';
 import { WORKER_BUILD } from './build-info.js';
 
 const base = String(process.env.AURATOK_URL || "https://auratok.com").replace(/\/+$/, "");
@@ -35,7 +35,10 @@ const BATTLE = WebcastEvent.LINK_MIC_BATTLE ?? "linkMicBattle";
 const ARMIES = WebcastEvent.LINK_MIC_ARMIES ?? "linkMicArmies";
 
 function start(job) {
-  const s = { job, conn: null, tracker: null, retryAt: 0, likeBuf: 0, likeTimer: null, stopped: false, booster: null, battleDelivery: Promise.resolve(), gate: createLiveGate(), inFlight: new Set(), levels:null, roomId:null };
+  const s = { job, conn: null, tracker: null, retryAt: 0, likeBuf: 0, likeTimer: null, stopped: false, booster: null, battleDelivery: Promise.resolve(), gate: createLiveGate(), inFlight: new Set(), levels:null, roomId:null, hostId:null };
+  const tag=`@${String(job.tiktok_username||job.username||'').replace(/^@/,'')}`;
+  s.levelSnaps=createLevelSnapshots({log:m=>log(`${tag} ${m}`)});
+  s.levelStats=setInterval(()=>s.levelSnaps.flushStats(),60000); s.levelStats.unref?.();
   s.levels=createLevelDelivery({directory:`${process.env.LEVEL_SPOOL_DIR||'/tmp/auratok-level-spool'}/${job.user_id}`,log,send:async body=>{if(s.stopped||!await s.gate.wait())return 503;const r=await fetch(`${base}/api/public/events`,{method:'POST',headers:{'Content-Type':'application/json','x-api-key':job.api_key},body:JSON.stringify(body),signal:AbortSignal.timeout(15000)});return r.status;}});
   s.booster = createBoosterCollector({ spoolDir: `${process.env.BOOSTER_SPOOL_DIR || '/tmp/auratok-booster-spool'}/${job.user_id}`, post: async body => {
     const response = await fetch(`${base}/api/public/boosters`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': job.api_key }, body: JSON.stringify(body), signal: AbortSignal.timeout(15000) });
@@ -49,7 +52,7 @@ function stop(id) {
   s.stopped = true; try { s.conn?.disconnect(); } catch {}
   s.gate.cancel();
   s.booster?.close();
-  s.levels?.close();
+  s.levels?.close(); clearInterval(s.levelStats);
   try { s.tracker?.stop(); } catch {}
   try { s.conn?.removeAllListeners(); s.conn?.disconnect(); } catch {}
   if (s.likeTimer) clearTimeout(s.likeTimer);
@@ -129,7 +132,7 @@ function connect(s) {
     if (s.stopped || s.conn !== c || !c.isConnected) return;
     s.gate.confirm(attempt);
     s.roomId=String(state?.roomId??c.roomId??'');
-    s.levels?.setRoom(s.roomId);
+    s.levels?.setRoom(s.roomId); s.levelSnaps.setRoom(s.roomId);
     log(`live @${username}`);
     const room = state?.roomInfo || c.roomInfo || {};
     const owner = room?.owner?.id_str || room?.owner?.id || room?.owner_user_id || room?.data?.owner?.id_str || "";
@@ -152,7 +155,7 @@ function connect(s) {
     const msg = String(d.comment || "").trim(); if (!msg) return;
     get(s, "/api/public/chat", { user: handleOf(d), msg, event_id: String(d.msgId ?? d.common?.msgId ?? ""), avatar: avatarOf(d.user), isFollower: Number(d.user?.followRole ?? 0) >= 1 ? "1" : "0", isSubscriber: d.user?.isSubscriber ? "1" : "0", isModerator: d.user?.isModerator ? "1" : "0" });
   });
-  c.on(WebcastEvent.BARRAGE??'barrage',d=>{if(s.stopped||s.conn!==c||!c.isConnected)return;const body=normalizeLevelBarrage(d,c.roomId??s.roomId,log);if(body)void s.levels?.enqueue(body);});
+  c.on(WebcastEvent.BARRAGE??'barrage',d=>{if(s.stopped||s.conn!==c||!c.isConnected)return;s.levelSnaps.noteBarrage(d?.msgType);const body=normalizeLevelBarrage(d,c.roomId??s.roomId,log);if(body)void s.levels?.enqueue(body);});
   c.on(WebcastEvent.GIFT, (d) => {
     const g = d.giftDetails || d.gift || {};
     const giftType = Number(d.giftType ?? g.type ?? g.giftType ?? 0);
@@ -187,6 +190,11 @@ function connect(s) {
     const type = decoded?.type ?? raw?.type ?? raw;
     const data = decoded?.data ?? decoded ?? raw?.data;
     tracker.onDecoded(type, data);
+    if (!s.stopped && s.conn === c && c.isConnected && s.roomId && data?.user) {
+      const u = data.user;
+      if (!s.hostId && String(u.uniqueId || u.displayId || '').toLowerCase() === username.toLowerCase()) s.hostId = [u.userId, u.idStr, u.id].map(v => String(v ?? '')).find(v => /^\d{5,30}$/.test(v)) || null;
+      for (const body of s.levelSnaps.observe(u, s.roomId, tracker.status().hostId || s.hostId)) void s.levels?.enqueue(body);
+    }
     s.booster.setCreator(tracker.status().hostId);
     if (String(type) !== 'WebcastLinkMicBattleItemCard') s.booster.observe(String(type), data);
     probeMessage(s, String(type), data, raw);

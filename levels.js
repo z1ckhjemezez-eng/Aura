@@ -29,4 +29,37 @@ export function createLevelDelivery({directory,send,log=()=>{}}){
  const flush=async()=>{if(running||closed||!activeRoom)return;running=true;try{await mkdir(directory,{recursive:true});const files=(await readdir(directory)).filter(f=>f.endsWith('.json')).sort();for(const file of files){if(closed)break;const path=join(directory,file);let body;try{body=JSON.parse(await readFile(path,'utf8'));}catch{log('Level retry file unreadable');continue;}if(body.level_event?.room_id!==activeRoom)continue;try{const status=await send(body);log(`AuraLevel delivery HTTP ${status}`);if(status>=200&&status<300)await unlink(path);else if(status===400)log('Level delivery rejected; retained for inspection');else break;}catch{log('AuraLevel delivery network failure; retained');break;}}}finally{running=false;}};
  const timer=setInterval(()=>void flush().catch(()=>log('Level retry unavailable')),10000);timer.unref?.();
  return {setRoom(room){activeRoom=String(room);void flush().catch(()=>log('Level retry unavailable'));},async enqueue(body){try{await mkdir(directory,{recursive:true});const event=body.level_event;const filename=Buffer.from(`${event.room_id}:${event.event_id}`).toString('hex').slice(0,450)+'.json';const path=join(directory,filename);await writeFile(path+'.tmp',JSON.stringify(body));await rename(path+'.tmp',path);void flush().catch(()=>log('Level retry unavailable'));}catch{log('Level event could not be persisted');}},close(){closed=true;clearInterval(timer);}};
+}// TikTok often omits the fan-upgrade barrage. Every chat/gift/like/join still carries the viewer's
+// authoritative badge levels; a level above the stored baseline is a real upgrade. Fan-club levels
+// count only when the club's anchorId is this creator, never another creator's club.
+export function createLevelSnapshots({log=()=>{}}={}){
+ const seen=new Map(),stats={};let room=null;
+ const bump=k=>{stats[k]=(stats[k]??0)+1;};
+ const identity=u=>[u?.userId,u?.idStr,u?.id].map(v=>String(v??'').trim()).find(v=>/^\d{1,30}$/.test(v)&&v!=='0');
+ const make=(kind,u,id,level,roomId,extra)=>{
+  const key=`${kind}:${id}`;if(seen.get(key)===level){bump(`${kind}_unchanged`);return null;}
+  seen.set(key,level);if(seen.size>20000)seen.delete(seen.keys().next().value);
+  const username=u.uniqueId||u.displayId||u.nickname;if(!username||String(username).length>100){bump(`${kind}_no_name`);return null;}
+  const avatar=u?.profilePicture?.urls?.[0]??u?.avatarThumb?.urlList?.[0];
+  bump(`${kind}_sent`);
+  return {type:'level_up',level_event:{kind,level,sender_user_id:id,username:String(username).slice(0,100),display_name:String(u.nickname||username).slice(0,100),...(avatar?{avatar_url:avatar}:{}),event_id:`snapshot:${kind}:${id}:${level}`,room_id:String(roomId),source:'snapshot',field:kind==='fan'?'user.fansClub.data.level':'user.payGrade.level',...extra}};
+ };
+ return {
+  setRoom(r){if(String(r)!==room){room=String(r);seen.clear();}},
+  observe(u,roomId,hostId){
+   const out=[];if(!u||typeof u!=='object'||!/^\d{5,30}$/.test(String(roomId??'')))return out;
+   const id=identity(u);if(!id)return out;
+   const club=u.fansClub?.data;const fan=Number(club?.level);
+   if(Number.isInteger(fan)&&fan>0&&fan<=10000){
+    const anchor=String(club?.anchorId??'').trim();
+    if(!hostId)bump('fan_waiting_for_creator_id');else if(anchor!==String(hostId))bump('fan_other_creator_club');
+    else{const b=make('fan',u,id,fan,roomId,{anchor_id:anchor});if(b)out.push(b);}
+   }
+   const grade=Number(u.payGrade?.level);
+   if(Number.isInteger(grade)&&grade>0&&grade<=10000){const b=make('gifter',u,id,grade,roomId,{});if(b)out.push(b);}
+   return out;
+  },
+  noteBarrage(type){bump(`barrage_type_${Number(type)||0}`);},
+  flushStats(){const keys=Object.keys(stats);if(!keys.length)return;log(`AuraLevel last minute: ${keys.sort().map(k=>`${k}=${stats[k]}`).join(' ')}`);for(const k of keys)delete stats[k];},
+ };
 }
