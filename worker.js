@@ -179,7 +179,7 @@ function connect(s) {
     const eventId = String(d.msgId ?? d.common?.msgId ?? "");
     if (eventId) post(s, "/api/public/events", { type: "like", username: handleOf(d), likes: Number(d.likeCount || 1), event_id: eventId });
     s.likeBuf += Number(d.likeCount || 1); if (s.likeTimer) return;
-    s.likeTimer = setTimeout(() => { s.likeTimer = null; const n = s.likeBuf; s.likeBuf = 0; get(s, "/api/public/goal", { type: "like", count: String(n) }); }, 3000);
+    s.likeTimer = setTimeout(() => { s.likeTimer = null; const n = s.likeBuf; s.likeBuf = 0; get(s, "/api/public/goal", { type: "like", count: String(n) }); }, 800);
   });
   c.on(WebcastEvent.MEMBER ?? 'member', (d) => seeViewer(d?.user));
   c.on(WebcastEvent.FOLLOW, (d) => get(s, "/api/public/goal", { type: "follow", count: "1", user: handleOf(d), event_id: String(d.msgId ?? d.common?.msgId ?? "") }));
