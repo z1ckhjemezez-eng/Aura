@@ -299,5 +299,16 @@ async function towerTick() {
   finally { towerTicking = false; }
 }
 void towerTick(); setInterval(() => void towerTick(), 1000);
+let raceTicking = false;
+async function raceTick() {
+  if (raceTicking) return;
+  raceTicking = true;
+  try {
+    const response = await fetch(`${base}/api/public/race-tick`, { method: 'POST', headers: { 'x-worker-secret': secret }, signal: AbortSignal.timeout(12000) });
+    if (!response.ok) log(`AuraRace service replied ${response.status}`);
+  } catch { log('AuraRace service unavailable'); }
+  finally { raceTicking = false; }
+}
+void raceTick(); setInterval(() => void raceTick(), 1000);
 // tiny health server so it can also run as a Render web service
 import("node:http").then(({ createServer }) => { if (process.env.PORT) createServer((_, r) => r.end("ok")).listen(process.env.PORT); });
