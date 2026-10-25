@@ -9,6 +9,7 @@ import { verifiedLive, connectionFailure, ownerObserved } from './connection-sta
 import { createLiveGate } from './live-session.js';
 import { normalizeLevelBarrage,createLevelDelivery,createLevelSnapshots } from './levels.js';
 import { WORKER_BUILD } from './build-info.js';
+import { liveLike, giftStreakId, senderId } from './live-events.js';
 
 const base = String(process.env.AURATOK_URL || "https://auratok.com").replace(/\/+$/, "");
 const secret = process.env.WORKER_SECRET || "";
@@ -59,10 +60,10 @@ function stop(id) {
   sessions.delete(id); pending.delete(id);
 }
 async function get(s, path, params) {
-  return forward(s, () => fetch(`${base}${path}?${new URLSearchParams({ key: s.job.api_key, ...params })}`));
+  return forward(s, () => fetch(`${base}${path}?${new URLSearchParams({ key: s.job.api_key, ...params, ...(path === '/api/public/gift' ? {live_generation: s.generation} : {}) })}`));
 }
 async function post(s, path, body) {
-  return forward(s, () => fetch(`${base}${path}`, { method: "POST", headers: { "Content-Type": "application/json", "x-api-key": s.job.api_key }, body: JSON.stringify(body) }));
+  return forward(s, () => fetch(`${base}${path}`, { method: "POST", headers: { "Content-Type": "application/json", "x-api-key": s.job.api_key }, body: JSON.stringify({...body, ...(path === '/api/public/events' ? {live_generation: s.generation} : {})}) }));
 }
 async function forward(s, send) {
   if (s.stopped || !await s.gate.wait()) return;
@@ -128,10 +129,12 @@ function connect(s) {
     if (!c.isConnected || !state?.roomId) throw new Error('LIVE room is not open');
     await Promise.allSettled([...s.inFlight]);
     if (s.stopped || s.conn !== c || !c.isConnected) return;
-    await api('POST', { beginLive: { user_id: s.job.user_id, room_id: String(state.roomId), username, revision: s.job.revision } });
+    const initialized = await api('POST', { beginLive: { user_id: s.job.user_id, room_id: String(state.roomId), username, revision: s.job.revision } });
     if (s.stopped || s.conn !== c || !c.isConnected) return;
-    s.gate.confirm(attempt);
+    s.generation = initialized?.session?.generation;
+    if (!s.generation) throw new Error('LIVE initialization missing generation');
     s.roomId=String(state?.roomId??c.roomId??'');
+    s.gate.confirm(attempt);
     s.levels?.setRoom(s.roomId); s.levelSnaps.setRoom(s.roomId);
     log(`live @${username}`);
     const room = state?.roomInfo || c.roomInfo || {};
@@ -157,6 +160,7 @@ function connect(s) {
   });
   c.on(WebcastEvent.BARRAGE??'barrage',d=>{if(s.stopped||s.conn!==c||!c.isConnected)return;s.levelSnaps.noteBarrage(d?.msgType);const body=normalizeLevelBarrage(d,c.roomId??s.roomId,log);if(body)void s.levels?.enqueue(body);});
   c.on(WebcastEvent.GIFT, (d) => { seeViewer(d?.user);
+    if (s.stopped || s.conn !== c || !c.isConnected) return;
     const g = d.giftDetails || d.gift || {};
     const giftType = Number(d.giftType ?? g.type ?? g.giftType ?? 0);
     const repeatEnd = d.repeatEnd === true || Number(d.repeatEnd) === 1;
@@ -166,19 +170,22 @@ function connect(s) {
     const battleId = tracker.status().battleId;
     const giftParams = {
       user: handleOf(d), nickname: d.user?.nickname || "", gift: d.giftName || g.name || g.giftName || "",
-      sender_user_id: String(d.user?.userId ?? d.user?.idStr ?? d.user?.id ?? d.userId ?? ''),
+      sender_user_id: senderId(d),
       gift_id: String(d.giftId ?? g.id ?? ""), quantity: String(qty), coins: String(Number(per ?? 1) * qty),
       diamonds: per !== undefined ? String(per) : "", avatar: avatarOf(d.user), event_id: String(d.msgId ?? d.common?.msgId ?? ""),
       gift_icon: d.giftPictureUrl || g.image?.urlList?.[0] || "", gift_type: String(giftType), repeat_end: repeatEnd ? "true" : "false",
+      streak_id: giftStreakId(d, c.roomId || s.roomId),
+      live_generation: s.generation || '',
       ...(battleId ? { battleId } : {}),
     };
     if (battleId) deliverBattle(s, () => get(s, "/api/public/gift", giftParams));
     else get(s, "/api/public/gift", giftParams);
   });
   c.on(WebcastEvent.LIKE, (d) => { seeViewer(d?.user);
-    const eventId = String(d.msgId ?? d.common?.msgId ?? "");
-    if (eventId) post(s, "/api/public/events", { type: "like", username: handleOf(d), likes: Number(d.likeCount || 1), event_id: eventId });
-    s.likeBuf += Number(d.likeCount || 1); if (s.likeTimer) return;
+    if (s.stopped || s.conn !== c || !c.isConnected) return;
+    const like = liveLike(d); if (!like) return;
+    if (like.eventId) post(s, "/api/public/events", { type: "like", username: handleOf(d), sender_user_id: like.sender, likes: like.count, event_id: like.eventId, live_generation: s.generation });
+    s.likeBuf += like.count; if (s.likeTimer) return;
     s.likeTimer = setTimeout(() => { s.likeTimer = null; const n = s.likeBuf; s.likeBuf = 0; get(s, "/api/public/goal", { type: "like", count: String(n) }); }, 800);
   });
   c.on(WebcastEvent.MEMBER ?? 'member', (d) => seeViewer(d?.user));
@@ -280,5 +287,17 @@ async function tick() {
 }
 log(`AuraTok Cloud Worker build ${WORKER_BUILD} → ${base}`);
 tick(); setInterval(tick, 20_000);
+// Independent of LIVE sockets: Test Mode also needs an authoritative gameplay clock.
+let towerTicking = false;
+async function towerTick() {
+  if (towerTicking) return;
+  towerTicking = true;
+  try {
+    const response = await fetch(`${base}/api/public/tower-tick`, { method: 'POST', headers: { 'x-worker-secret': secret }, signal: AbortSignal.timeout(12000) });
+    if (!response.ok) log(`AuraTower service replied ${response.status}`);
+  } catch { log('AuraTower service unavailable'); }
+  finally { towerTicking = false; }
+}
+void towerTick(); setInterval(() => void towerTick(), 1000);
 // tiny health server so it can also run as a Render web service
 import("node:http").then(({ createServer }) => { if (process.env.PORT) createServer((_, r) => r.end("ok")).listen(process.env.PORT); });

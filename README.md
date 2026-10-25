@@ -37,6 +37,13 @@ A health endpoint answers on `$PORT` so the service also works as a Render web s
 
 ## New version
 
+### AuraTower Defense build `2026.10.25-tower.2`
+Publishes an independent service-authenticated game heartbeat every second, including Test Mode without a LIVE socket. The app owns the simulation and database checkpoints; this collector never decides damage, kills or winners. An interrupted heartbeat safely pauses the game. Publish the matching AuraTok app first, then deploy this complete folder. Existing settings and OBS links stay unchanged.
+
+This build reads the raw LIVE like `count` delta (not cumulative `total`), forwards real sender/message IDs, and attaches source gift-group IDs for completed streak deduplication. Gifts and likes carry the confirmed room generation; Tower ignores older-room deliveries. Aggregate Goal Bar batches remain separate and are not counted again by Tower. Missing message IDs are never invented for Tower attribution.
+
+Update the existing Render service with every file, including **live-events.js**, then deploy. Logs must show **AuraTok Cloud Worker build 2026.10.25-tower.2**. Keep the existing `WORKER_SECRET` and `AURATOK_URL`; no new secret is needed. In AuraTok, confirm a real LIVE connection, disable Test Mode and start the game. Verify one configured completed gift and one like-threshold crossing in the game and the existing OBS source. Packaging/tests alone do not verify a real LIVE session.
+
 ### AuraLevel diagnostic build `2026.10.23-levels.2`
 
 Render → **Aura** → **Logs** must show `AuraTok Cloud Worker build 2026.10.23-levels.2` after deploying the complete package. The old `1.0.0` package value and a green LIVE connection do not establish which code is running.
