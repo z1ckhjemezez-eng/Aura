@@ -1,0 +1,12 @@
+services:
+  - type: worker
+    name: auratok-cloud-worker
+    runtime: node
+    plan: starter
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: AURATOK_URL
+        value: https://auratok.com
+      - key: WORKER_SECRET
+        sync: false
