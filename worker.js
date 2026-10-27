@@ -60,7 +60,7 @@ function stop(id) {
   sessions.delete(id); pending.delete(id);
 }
 async function get(s, path, params) {
-  return forward(s, () => fetch(`${base}${path}?${new URLSearchParams({ key: s.job.api_key, ...params, ...(path === '/api/public/gift' ? {live_generation: s.generation} : {}) })}`));
+  return forward(s, () => fetch(`${base}${path}?${new URLSearchParams({ key: s.job.api_key, ...params, live_generation:s.generation })}`));
 }
 async function post(s, path, body) {
   return forward(s, () => fetch(`${base}${path}`, { method: "POST", headers: { "Content-Type": "application/json", "x-api-key": s.job.api_key }, body: JSON.stringify({...body, ...(path === '/api/public/events' ? {live_generation: s.generation} : {})}) }));
@@ -74,7 +74,7 @@ async function forward(s, send) {
 }
 /** Battle/league endpoints read the creator key from the payload — the tracker only builds bodies. */
 async function postAs(s, path, body) {
-  return forward(s, () => fetch(`${base}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: s.job.api_key, ...body }) }));
+  return forward(s, () => fetch(`${base}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: s.job.api_key, ...body,live_generation:s.generation }) }));
 }
 
 // Preserve socket order: start persists before gifts; end waits for all received battle gifts.
@@ -188,7 +188,7 @@ function connect(s) {
     s.likeBuf += like.count; if (s.likeTimer) return;
     s.likeTimer = setTimeout(() => { s.likeTimer = null; const n = s.likeBuf; s.likeBuf = 0; get(s, "/api/public/goal", { type: "like", count: String(n) }); }, 800);
   });
-  c.on(WebcastEvent.MEMBER ?? 'member', (d) => seeViewer(d?.user));
+  c.on(WebcastEvent.MEMBER ?? 'member', (d) => {seeViewer(d?.user);if(s.stopped||s.conn!==c||!c.isConnected)return;const identity=senderId(d);const username=d.user?.uniqueId||d.user?.displayId||d.uniqueId;if(!identity&&!username)return;void post(s,'/api/public/events',{type:'join',username:String(username||''),sender_user_id:identity,event_id:String(d.msgId??d.common?.msgId??'')});});
   c.on(WebcastEvent.FOLLOW, (d) => get(s, "/api/public/goal", { type: "follow", count: "1", user: handleOf(d), event_id: String(d.msgId ?? d.common?.msgId ?? "") }));
   c.on(WebcastEvent.SHARE, (d) => post(s, "/api/public/events", { type: "share", username: handleOf(d), event_id: String(d.msgId ?? d.common?.msgId ?? "") }));
   c.on(BATTLE, (m) => tracker.onBattleMessage(m));

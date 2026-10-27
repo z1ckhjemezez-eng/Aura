@@ -163,7 +163,7 @@ export function createBattleTracker(options = {}) {
     scheduleUpdate();
   }
 
-  function endBattle(id) {
+  function endBattle(id, resultConfirmed=false) {
     const finish = () => {
       endTimer = null;
       if (!battle || (id && battle.id !== String(id))) return;
@@ -176,7 +176,7 @@ export function createBattleTracker(options = {}) {
       log(`battle ended: ${b.our} vs ${b.opp} · MVP: ${top ? "@" + top.username + " (" + top.points + ")" : "no data"}`);
       void post({
         event: "end", battleId: b.id, ourScore: b.our, opponentScore: b.opp,
-        opponent, mode, contributors: [...b.contributors.values()],
+        opponent, mode, contributors: [...b.contributors.values()], resultConfirmed,
       });
     };
     if (endDelay > 0) { if (endTimer) clearTimeout(endTimer); endTimer = setTimeout(finish, endDelay); }
@@ -194,7 +194,13 @@ export function createBattleTracker(options = {}) {
     if (m.action === ACTION_OPEN && m.battleId) startBattle(String(m.battleId));
     const map = toArmyMap(m.armies);
     if (m.teamArmies?.length || Object.keys(map).length) applyArmies(m.battleId, map, m.teamArmies);
-    if (m.action === ACTION_FINISH || m.action === ACTION_CUT_SHORT) endBattle(m.battleId);
+    // Only a normal finish with both explicit final side totals can confirm a result.
+    const entries=Object.entries(map);
+    const own=entries.find(([key,a])=>String(a?.anchorIdStr||key)===hostId);
+    const other=entries.filter(([key,a])=>String(a?.anchorIdStr||key)!==hostId);
+    const explicit=a=>a&&a.hostscore!==undefined&&Number.isSafeInteger(Number(a.hostscore))&&Number(a.hostscore)>=0;
+    const confirmed=m.action===ACTION_FINISH&&!!hostId&&explicit(own?.[1])&&other.length===1&&explicit(other[0]?.[1]);
+    if (m.action === ACTION_FINISH || m.action === ACTION_CUT_SHORT) endBattle(m.battleId,confirmed);
   }
 
   function onArmiesMessage(m) {
