@@ -2,7 +2,7 @@
 // who entered their username on AuraTok, and forwards events to the AuraTok API.
 // Battles (start/end, real team scores, opponent, contributors) and league
 // fragments are tracked here too, so a cloud connection needs no extra program.
-import { TikTokLiveConnection, WebcastEvent, ControlEvent, UserOfflineError } from "tiktok-live-connector";
+import { TikTokLiveConnection, WebcastEvent, ControlEvent, UserOfflineError, IsLiveRouteConfig } from "tiktok-live-connector";
 import { createBattleTracker } from "./battle.js";
 import { createBoosterCollector } from "./boosters.js";
 import { verifiedLive, connectionFailure, ownerObserved } from './connection-status.js';
@@ -14,12 +14,17 @@ import { createScout } from './scout.js';
 import { createBattleDiagnostics } from './battle-diagnostics.js';
 import { createSpeedChallenge } from './speed-challenge.js';
 import { createStatusDelivery } from './status-delivery.js';
+import { createConnectBudget, isSignRateLimit, rateLimitMessage } from './connect-budget.js';
 
 const base = String(process.env.AURATOK_URL || "https://auratok.com").replace(/\/+$/, "");
 const secret = process.env.WORKER_SECRET || "";
 const signApiKey = process.env.SIGN_API_KEY || undefined;
 if (secret.length < 16) { console.error("Set WORKER_SECRET"); process.exit(1); }
 const log = (...a) => console.log(new Date().toISOString(), ...a);
+// The LIVE pre-check only asks TikTok directly, so offline creators never use signing quota.
+if (IsLiveRouteConfig) IsLiveRouteConfig.skipFetchRoomIdFromEulerRoute = true;
+const budget = createConnectBudget();
+const OFFLINE_FULL_CHECK_MS = 5 * 60_000;
 
 const sessions = new Map(); // user_id -> session
 const pending = new Map();  // user_id -> {status,message}
@@ -103,6 +108,13 @@ function deliverBattle(s, send) {
 
 function connect(s) {
   if (s.stopped) return;
+  if (!budget.take()) {
+    if (budget.blocked()) {
+      setStatus(s.job.user_id, 'waiting', rateLimitMessage(budget.blockedUntil()));
+      s.retryAt = budget.blockedUntil() + Math.floor(Math.random() * 30_000);
+    } else s.retryAt = Date.now() + 5_000;
+    return;
+  }
   const attempt = s.gate.begin();
   if (s.likeTimer) clearTimeout(s.likeTimer);
   s.likeTimer = null; s.likeBuf = 0;
@@ -120,13 +132,20 @@ function connect(s) {
   const tracker = s.tracker;
   const opts = { enableExtendedGiftInfo: false }; if (signApiKey) opts.signApiKey = signApiKey;
   const c = new TikTokLiveConnection(username, opts); s.conn = c;
-  c.connect().then(async (state) => {
+  const run = async () => {
+    // Cheap pre-check without the signing service; a full connect still runs at least every 5 min.
+    const live = await c.fetchIsLive().catch(() => null);
+    if (live === false && Date.now() - (s.lastFullConnectAt ?? 0) < OFFLINE_FULL_CHECK_MS) throw new UserOfflineError("The requested user isn't online :(");
+    s.lastFullConnectAt = Date.now();
+    return c.connect();
+  };
+  run().then(async (state) => {
     if (s.stopped || s.conn !== c) return;
     if (!verifiedLive(username, c, state)) {
       if (ownerObserved(state?.roomInfo ?? c.roomInfo)) {
         s.gate.cancel();
         setStatus(s.job.user_id, 'error', 'TikTok account identity could not be confirmed. Not connected.');
-        s.retryAt = Date.now() + 120_000;
+        s.retryAt = Date.now() + 300_000;
         c.removeAllListeners(); void c.disconnect();
         return;
       }
@@ -165,6 +184,13 @@ function connect(s) {
     if (s.stopped || s.conn !== c) return;
     s.gate.cancel();
     s.booster.disconnected();
+    if (isSignRateLimit(err)) {
+      const until = budget.noteRateLimit(err);
+      log(`@${username} connect paused: signing service hourly limit; all new connects resume ${new Date(until).toISOString()}`);
+      setStatus(s.job.user_id, 'waiting', rateLimitMessage(until));
+      s.retryAt = until + Math.floor(Math.random() * 30_000);
+      return;
+    }
     log(`@${username} connect failed:`, err?.constructor?.name, String(err?.message ?? err).slice(0, 200));
     const result = connectionFailure(err, username, c.roomInfo, err instanceof UserOfflineError);
     setStatus(s.job.user_id, result.status, result.message);
@@ -299,7 +325,7 @@ async function tick() {
   await flushStatus();
   } finally { ticking = false; }
 }
-log(`AuraTok Cloud Worker build ${WORKER_BUILD} → ${base}`);
+log(`AuraTok Cloud Worker build ${WORKER_BUILD} → ${base} (SIGN_API_KEY ${signApiKey ? 'set' : 'NOT set'})`);
 tick(); setInterval(tick, 5_000);
 // Independent of LIVE sockets: Test Mode also needs an authoritative gameplay clock.
 let towerTicking = false;
@@ -315,7 +341,7 @@ async function towerTick() {
 void towerTick(); setInterval(() => void towerTick(), 1000);
 // Gift Scout: visits admin-queued public LIVE rooms one at a time and imports
 // each room's gift list. Runs independently of creator connections.
-createScout({ base, secret, signApiKey, log }).start();
+createScout({ base, secret, signApiKey, log, budget }).start();
 let raceTicking = false;
 async function raceTick() {
   if (raceTicking) return;

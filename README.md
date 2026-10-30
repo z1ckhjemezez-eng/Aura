@@ -37,6 +37,9 @@ A health endpoint answers on `$PORT` so the service also works as a Render web s
 
 ## New version
 
+### Connection limit protection `2026.10.30-connect-budget.1`
+When TikTok's signing service answers "Too many connections started" (hourly limit), the worker now pauses every new connection attempt until the service's reset time instead of retrying each creator every 2 minutes, and creators see "Retrying automatically in about N min" instead of a username error. Attempts are spread out (max 2 per 5 seconds) and offline creators are checked directly with TikTok first, so they no longer use signing quota every minute. Running LIVE connections are unaffected. The startup line shows whether `SIGN_API_KEY` is set (value never logged). The total hourly capacity still depends on the signing plan of that key.
+
 ### Faster connection reporting `2026.10.30-fast-connect.1`
 Job discovery now runs every 5 seconds instead of 20. Status transitions are sent immediately through one serialized sender; unchanged heartbeats remain every 20 seconds. Actual TikTok lookup, identity verification, LIVE room initialization, backoffs and revision guards are unchanged. Redeploy every file including `status-delivery.js` and confirm this startup build ID. The browser polls every second for the first minute after a connection request and avoids repeating network identity verification on every status read; owner RLS still governs reads. These changes remove scheduling overhead, not TikTok or database delays. New job lookups are four times as frequent; heartbeat write frequency is not increased. Real connect-to-LIVE latency remains unmeasured until Render is updated.
 
