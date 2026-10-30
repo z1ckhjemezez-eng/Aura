@@ -12,6 +12,7 @@ import { WORKER_BUILD } from './build-info.js';
 import { liveLike, giftStreakId, senderId } from './live-events.js';
 import { createScout } from './scout.js';
 import { createBattleDiagnostics } from './battle-diagnostics.js';
+import { createSpeedChallenge } from './speed-challenge.js';
 import { createStatusDelivery } from './status-delivery.js';
 
 const base = String(process.env.AURATOK_URL || "https://auratok.com").replace(/\/+$/, "");
@@ -55,6 +56,11 @@ function start(job) {
     const response = await fetch(`${base}/api/public/booster-probe`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': job.api_key }, body: JSON.stringify(body), signal: AbortSignal.timeout(10000) });
     if (!response.ok) throw new Error('Battle diagnostic delivery failed');
   } });
+  s.speedChallenge = createSpeedChallenge({ log, send: async body => {
+    if (s.stopped) return;
+    const response = await fetch(`${base}/api/public/booster-task`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': job.api_key }, body: JSON.stringify(body), signal: AbortSignal.timeout(10000) });
+    if (!response.ok) throw new Error('Speed Challenge delivery failed');
+  } });
   sessions.set(job.user_id, s);
   connect(s);
 }
@@ -63,6 +69,7 @@ function stop(id) {
   s.stopped = true; try { s.conn?.disconnect(); } catch {}
   s.gate.cancel();
   s.booster?.close();
+  s.speedChallenge?.close();
   s.levels?.close(); clearInterval(s.levelStats);
   try { s.tracker?.stop(); } catch {}
   try { s.conn?.removeAllListeners(); s.conn?.disconnect(); } catch {}
@@ -225,7 +232,7 @@ function connect(s) {
     s.booster.setCreator(tracker.status().hostId);
     if (String(type) !== 'WebcastLinkMicBattleItemCard') s.booster.observe(String(type), data);
     probeMessage(s, String(type), data, raw);
-    if (!s.stopped && s.conn === c && c.isConnected) s.battleDiagnostics?.observe(String(type), data);
+    if (!s.stopped && s.conn === c && c.isConnected) { s.battleDiagnostics?.observe(String(type), data); s.speedChallenge?.observe(String(type), data); }
   });
 }
 
