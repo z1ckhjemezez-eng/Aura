@@ -37,6 +37,14 @@ A health endpoint answers on `$PORT` so the service also works as a Render web s
 
 ## New version
 
+### Passive Speed Challenge diagnostics `2026.10.30-battle-diagnostics.1`
+
+Existing LIVE capture contains `WebcastLinkmicBattleTaskMessage` start configuration, progress, settlement and reward-summary messages. This is **not** yet proof of a Speed Challenge activation: start config announces future phases, and reward status/result enums need semantic verification. Automatic playback remains disabled; no inferred timer is added.
+
+Redeploy the complete folder on the existing Render service. For a representative battle, set `BATTLE_DIAGNOSTICS_UNTIL` to an explicit UTC ISO timestamp up to 30 minutes ahead, then restart the service. Capture is off by default, stops at that deadline (hard maximum 30 minutes), and stores at most 80 task and 40 other battle samples per session through the existing admin-only probe endpoint. It keeps only numeric phase/config/progress fields and TikTok translation keys; no names, IDs, text, URLs, credentials or raw protobuf bytes. Up to two sends run concurrently; failures/dropouts are not proof of absent signals. Remove the variable after the capture. Existing endpoint retention and hourly caps apply.
+
+Confirm the build identifier in Render logs. Record when TikTok visibly announces the challenge, starts accepting progress, reports success/failure, begins its reward and ends it. Compare these observations with captured phases before enabling any automatic effect. See `docs/speed-challenge-investigation.md` in the application repository for evidence and missing semantics. Packaging does not redeploy Render.
+
 ### AuraTower Defense build `2026.10.25-tower.2`
 Publishes an independent service-authenticated game heartbeat every second, including Test Mode without a LIVE socket. The app owns the simulation and database checkpoints; this collector never decides damage, kills or winners. An interrupted heartbeat safely pauses the game. Publish the matching AuraTok app first, then deploy this complete folder. Existing settings and OBS links stay unchanged.
 

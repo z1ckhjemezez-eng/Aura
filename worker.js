@@ -10,6 +10,8 @@ import { createLiveGate } from './live-session.js';
 import { normalizeLevelBarrage,createLevelDelivery,createLevelSnapshots } from './levels.js';
 import { WORKER_BUILD } from './build-info.js';
 import { liveLike, giftStreakId, senderId } from './live-events.js';
+import { createScout } from './scout.js';
+import { createBattleDiagnostics } from './battle-diagnostics.js';
 
 const base = String(process.env.AURATOK_URL || "https://auratok.com").replace(/\/+$/, "");
 const secret = process.env.WORKER_SECRET || "";
@@ -26,7 +28,7 @@ const setStatus = (id, status, message = "") => {
 };
 
 async function api(method, body) {
-  const r = await fetch(`${base}/api/public/cloud-worker`, { method, headers: { "Content-Type": "application/json", "x-worker-secret": secret }, body: body ? JSON.stringify(body) : undefined });
+  const r = await fetch(`${base}/api/public/cloud-worker`, { method, headers: { "Content-Type": "application/json", "x-worker-secret": secret }, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(15000) });
   if (!r.ok) throw new Error(`AuraTok ${r.status}`);
   return r.json();
 }
@@ -45,6 +47,11 @@ function start(job) {
     const response = await fetch(`${base}/api/public/boosters`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': job.api_key }, body: JSON.stringify(body), signal: AbortSignal.timeout(15000) });
     if (!response.ok) throw new Error('Booster delivery failed');
   }, log });
+  s.battleDiagnostics = createBattleDiagnostics({ until: process.env.BATTLE_DIAGNOSTICS_UNTIL, log, send: async body => {
+    if (s.stopped) return;
+    const response = await fetch(`${base}/api/public/booster-probe`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': job.api_key }, body: JSON.stringify(body), signal: AbortSignal.timeout(10000) });
+    if (!response.ok) throw new Error('Battle diagnostic delivery failed');
+  } });
   sessions.set(job.user_id, s);
   connect(s);
 }
@@ -215,6 +222,7 @@ function connect(s) {
     s.booster.setCreator(tracker.status().hostId);
     if (String(type) !== 'WebcastLinkMicBattleItemCard') s.booster.observe(String(type), data);
     probeMessage(s, String(type), data, raw);
+    if (!s.stopped && s.conn === c && c.isConnected) s.battleDiagnostics?.observe(String(type), data);
   });
 }
 
@@ -299,6 +307,9 @@ async function towerTick() {
   finally { towerTicking = false; }
 }
 void towerTick(); setInterval(() => void towerTick(), 1000);
+// Gift Scout: visits admin-queued public LIVE rooms one at a time and imports
+// each room's gift list. Runs independently of creator connections.
+createScout({ base, secret, signApiKey, log }).start();
 let raceTicking = false;
 async function raceTick() {
   if (raceTicking) return;
