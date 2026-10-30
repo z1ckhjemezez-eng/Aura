@@ -12,6 +12,7 @@ import { WORKER_BUILD } from './build-info.js';
 import { liveLike, giftStreakId, senderId } from './live-events.js';
 import { createScout } from './scout.js';
 import { createBattleDiagnostics } from './battle-diagnostics.js';
+import { createStatusDelivery } from './status-delivery.js';
 
 const base = String(process.env.AURATOK_URL || "https://auratok.com").replace(/\/+$/, "");
 const secret = process.env.WORKER_SECRET || "";
@@ -21,10 +22,12 @@ const log = (...a) => console.log(new Date().toISOString(), ...a);
 
 const sessions = new Map(); // user_id -> session
 const pending = new Map();  // user_id -> {status,message}
+const flushStatus = createStatusDelivery({ pending, send: statuses => api('POST', { statuses }), log });
 const setStatus = (id, status, message = "") => {
   const x = sessions.get(id); if (!x || x.stopped) return;
   x.status = { user_id: id, username: x.job.username, revision: x.job.revision, status, message };
   pending.set(id, x.status);
+  void flushStatus();
 };
 
 async function api(method, body) {
@@ -264,6 +267,7 @@ function probeMessage(s, type, data, raw) {
 }
 
 let ticking = false;
+let lastHeartbeat = 0;
 async function tick() {
   if (ticking) return; ticking = true;
   try {
@@ -282,19 +286,14 @@ async function tick() {
       x.booster.disconnected(); setStatus(x.job.user_id, 'connecting', 'LIVE disconnected. Reconnecting — not connected.');
       x.retryAt ||= Date.now() + 30_000;
     }
-    if (x.status && !pending.has(x.job.user_id)) pending.set(x.job.user_id, x.status);
+    if (Date.now() - lastHeartbeat >= 20_000 && x.status && !pending.has(x.job.user_id)) pending.set(x.job.user_id, x.status);
   }
-  if (pending.size) {
-    const statuses = [...pending.values()];
-    try {
-      await api("POST", { statuses });
-      for (const report of statuses) if (pending.get(report.user_id) === report) pending.delete(report.user_id);
-    } catch (e) { log('status failed', e.message); }
-  }
+  if (Date.now() - lastHeartbeat >= 20_000) lastHeartbeat = Date.now();
+  await flushStatus();
   } finally { ticking = false; }
 }
 log(`AuraTok Cloud Worker build ${WORKER_BUILD} → ${base}`);
-tick(); setInterval(tick, 20_000);
+tick(); setInterval(tick, 5_000);
 // Independent of LIVE sockets: Test Mode also needs an authoritative gameplay clock.
 let towerTicking = false;
 async function towerTick() {

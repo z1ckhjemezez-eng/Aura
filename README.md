@@ -37,6 +37,9 @@ A health endpoint answers on `$PORT` so the service also works as a Render web s
 
 ## New version
 
+### Faster connection reporting `2026.10.30-fast-connect.1`
+Job discovery now runs every 5 seconds instead of 20. Status transitions are sent immediately through one serialized sender; unchanged heartbeats remain every 20 seconds. Actual TikTok lookup, identity verification, LIVE room initialization, backoffs and revision guards are unchanged. Redeploy every file including `status-delivery.js` and confirm this startup build ID. The browser polls every second for the first minute after a connection request and avoids repeating network identity verification on every status read; owner RLS still governs reads. These changes remove scheduling overhead, not TikTok or database delays. New job lookups are four times as frequent; heartbeat write frequency is not increased. Real connect-to-LIVE latency remains unmeasured until Render is updated.
+
 ### Passive Speed Challenge diagnostics `2026.10.30-battle-diagnostics.1`
 
 Existing LIVE capture contains `WebcastLinkmicBattleTaskMessage` start configuration, progress, settlement and reward-summary messages. This is **not** yet proof of a Speed Challenge activation: start config announces future phases, and reward status/result enums need semantic verification. Automatic playback remains disabled; no inferred timer is added.

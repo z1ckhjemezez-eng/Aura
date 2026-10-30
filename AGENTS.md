@@ -2,3 +2,4 @@
 - Normalize raw gift/like identities in live-events.js; Tower receives source delta counts and confirmed room generations through existing ingress, never aggregate goal batches, so room totals and old-room deliveries cannot inflate gameplay.
 - Gift Scout (scout.js/scout-gifts.js): polls /api/public/gift-scout with the worker secret, connects briefly to one queued public room at a time and reports mapRoomGifts output; offline rooms stay 'offline' until an admin requeues.
 - Battle task diagnostics are passive, explicitly deadline-enabled and capped at 30 minutes/120 samples per worker session; allowlisted task numbers/translation keys only, no IDs/text/URLs/raw bytes, and never generate booster activations from scheduled task configuration.
+- Discover jobs every 5 seconds but heartbeat unchanged sessions every 20 seconds; one serialized status sender publishes transitions immediately and acknowledges exact reports only, preserving newer transitions and retries.
