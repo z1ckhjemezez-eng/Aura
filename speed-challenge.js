@@ -15,12 +15,14 @@ export function createSpeedChallenge({ send, log = () => {}, now = Date.now }) {
     observe(type, payload) {
       if (type !== 'WebcastLinkmicBattleTaskMessage' || !payload || typeof payload !== 'object') return;
       if (Number(payload.taskMessageType ?? 0) !== 0) return; // start announcements only
-      const start = payload.start;
-      if (!start || typeof start !== 'object') return;
-      const target = Number(start.targetStartTimestamp ?? payload.targetStartTimestamp);
+      // LIVE payloads nest the schedule under start.config; flat shapes kept for compatibility.
+      const outer = payload.start;
+      if (!outer || typeof outer !== 'object') return;
+      const start = outer.config && typeof outer.config === 'object' ? outer.config : outer;
+      const target = Number(start.targetConfig?.targetStartTimestamp ?? start.targetStartTimestamp ?? payload.targetStartTimestamp);
       if (!Number.isFinite(target) || target <= 0) return;
       // TikTok's own start message states the reward multiplier (x2/x3); never guessed.
-      const rawMulti = Number(start.rewardConfig?.rewardMultiple ?? start.targetConfig?.progressTarget);
+      const rawMulti = Number(start.rewardConfig?.rewardMultiple);
       const multiplier = Number.isInteger(rawMulti) && rawMulti >= 2 && rawMulti <= 9 ? rawMulti : null;
       const battleId = String(payload.battleId ?? '') || `task-${target}`;
       const key = `${battleId}:${target}`;
