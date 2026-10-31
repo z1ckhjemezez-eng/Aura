@@ -198,7 +198,8 @@ function connect(s) {
   });
   c.on(ControlEvent.DISCONNECTED, () => { if (!s.stopped && s.conn === c) { s.gate.cancel(); s.booster.disconnected(); setStatus(s.job.user_id, "connecting", "LIVE disconnected. Reconnecting — not connected."); s.retryAt = Date.now() + 30_000; } });
   c.on(WebcastEvent.CHAT, (d) => { seeViewer(d?.user);
-    const msg = String(d.comment || "").trim(); if (!msg) return;
+    if (s.stopped || s.conn !== c || !c.isConnected) return;
+    const msg = String(d.content ?? d.comment ?? "").trim(); if (!msg) return;
     get(s, "/api/public/chat", { user: handleOf(d), msg, event_id: String(d.msgId ?? d.common?.msgId ?? ""), avatar: avatarOf(d.user), isFollower: Number(d.user?.followRole ?? 0) >= 1 ? "1" : "0", isSubscriber: d.user?.isSubscriber ? "1" : "0", isModerator: d.user?.isModerator ? "1" : "0" });
   });
   c.on(WebcastEvent.BARRAGE??'barrage',d=>{if(s.stopped||s.conn!==c||!c.isConnected)return;s.levelSnaps.noteBarrage(d?.msgType);const body=normalizeLevelBarrage(d,c.roomId??s.roomId,log);if(body)void s.levels?.enqueue(body);});
@@ -231,7 +232,7 @@ function connect(s) {
     s.likeBuf += like.count; if (s.likeTimer) return;
     s.likeTimer = setTimeout(() => { s.likeTimer = null; const n = s.likeBuf; s.likeBuf = 0; get(s, "/api/public/goal", { type: "like", count: String(n) }); }, 800);
   });
-  c.on(WebcastEvent.MEMBER ?? 'member', (d) => {seeViewer(d?.user);if(s.stopped||s.conn!==c||!c.isConnected)return;const identity=senderId(d);const username=d.user?.uniqueId||d.user?.displayId||d.uniqueId;if(!identity&&!username)return;void post(s,'/api/public/events',{type:'join',username:String(username||''),sender_user_id:identity,event_id:String(d.msgId??d.common?.msgId??'')});});
+  c.on(WebcastEvent.MEMBER ?? 'member', (d) => {seeViewer(d?.user);if(s.stopped||s.conn!==c||!c.isConnected)return;const act=Number(d?.action??1);if(act!==1&&act!==0)return;const identity=senderId(d);const username=d.user?.uniqueId||d.user?.displayId||d.uniqueId;if(!identity&&!username)return;void post(s,'/api/public/events',{type:'join',username:String(username||''),sender_user_id:identity,event_id:String(d.msgId??d.common?.msgId??'')});});
   c.on(WebcastEvent.FOLLOW, (d) => get(s, "/api/public/goal", { type: "follow", count: "1", user: handleOf(d), event_id: String(d.msgId ?? d.common?.msgId ?? "") }));
   c.on(WebcastEvent.SHARE, (d) => post(s, "/api/public/events", { type: "share", username: handleOf(d), event_id: String(d.msgId ?? d.common?.msgId ?? "") }));
   c.on(BATTLE, (m) => tracker.onBattleMessage(m));
