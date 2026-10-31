@@ -37,6 +37,9 @@ A health endpoint answers on `$PORT` so the service also works as a Render web s
 
 ## New version
 
+### Offline timeout `2026.10.31-offline-timeout.1`
+Connections turn off after 10 continuous minutes of confirmed offline observations. A fresh direct TikTok check runs before disabling; active LIVE, uncertain errors and new connection requests cannot be expired by an old report. The creator can press Connect again; usernames, settings and history remain saved. Publish AuraTok and redeploy the full Render folder, including `offline-timeout.js`. No new environment variables are required. A worker restart safely restarts the observation window.
+
 ### Connection limit protection `2026.10.30-connect-budget.1`
 When TikTok's signing service answers "Too many connections started" (hourly limit), the worker now pauses every new connection attempt until the service's reset time instead of retrying each creator every 2 minutes, and creators see "Retrying automatically in about N min" instead of a username error. Attempts are spread out (max 2 per 5 seconds) and offline creators are checked directly with TikTok first, so they no longer use signing quota every minute. Running LIVE connections are unaffected. The startup line shows whether `SIGN_API_KEY` is set (value never logged). The total hourly capacity still depends on the signing plan of that key.
 

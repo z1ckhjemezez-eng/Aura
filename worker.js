@@ -9,12 +9,13 @@ import { verifiedLive, connectionFailure, ownerObserved } from './connection-sta
 import { createLiveGate } from './live-session.js';
 import { normalizeLevelBarrage,createLevelDelivery,createLevelSnapshots } from './levels.js';
 import { WORKER_BUILD } from './build-info.js';
-import { liveLike, giftStreakId, senderId } from './live-events.js';
+import { liveLike, giftStreakId, senderId, likeMetadata } from './live-events.js';
 import { createScout } from './scout.js';
 import { createBattleDiagnostics } from './battle-diagnostics.js';
 import { createSpeedChallenge } from './speed-challenge.js';
 import { createStatusDelivery } from './status-delivery.js';
 import { createConnectBudget, isSignRateLimit, rateLimitMessage } from './connect-budget.js';
+import { createOfflineTimeout } from './offline-timeout.js';
 
 const base = String(process.env.AURATOK_URL || "https://auratok.com").replace(/\/+$/, "");
 const secret = process.env.WORKER_SECRET || "";
@@ -48,6 +49,7 @@ const ARMIES = WebcastEvent.LINK_MIC_ARMIES ?? "linkMicArmies";
 
 function start(job) {
   const s = { job, conn: null, tracker: null, retryAt: 0, likeBuf: 0, likeTimer: null, stopped: false, booster: null, battleDelivery: Promise.resolve(), gate: createLiveGate(), inFlight: new Set(), levels:null, roomId:null, hostId:null };
+  s.offline = createOfflineTimeout();
   const tag=`@${String(job.tiktok_username||job.username||'').replace(/^@/,'')}`;
   s.levelSnaps=createLevelSnapshots({log:m=>log(`${tag} ${m}`)});
   s.levelStats=setInterval(()=>s.levelSnaps.flushStats(),60000); s.levelStats.unref?.();
@@ -135,6 +137,8 @@ function connect(s) {
   const run = async () => {
     // Cheap pre-check without the signing service; a full connect still runs at least every 5 min.
     const live = await c.fetchIsLive().catch(() => null);
+    if (s.stopped || s.conn !== c) throw new Error('Connection attempt superseded');
+    s.offline.observe(live);
     if (live === false && Date.now() - (s.lastFullConnectAt ?? 0) < OFFLINE_FULL_CHECK_MS) throw new UserOfflineError("The requested user isn't online :(");
     s.lastFullConnectAt = Date.now();
     return c.connect();
@@ -162,6 +166,7 @@ function connect(s) {
       log(`live @${username} (owner details omitted by TikTok; identity accepted from connect resolution)`);
     }
     s.identityRetries = 0;
+    s.offline.observe(true);
     if (!c.isConnected || !state?.roomId) throw new Error('LIVE room is not open');
     await Promise.allSettled([...s.inFlight]);
     if (s.stopped || s.conn !== c || !c.isConnected) return;
@@ -185,6 +190,7 @@ function connect(s) {
     s.gate.cancel();
     s.booster.disconnected();
     if (isSignRateLimit(err)) {
+      s.offline.observe(null);
       const until = budget.noteRateLimit(err);
       log(`@${username} connect paused: signing service hourly limit; all new connects resume ${new Date(until).toISOString()}`);
       setStatus(s.job.user_id, 'waiting', rateLimitMessage(until));
@@ -193,6 +199,7 @@ function connect(s) {
     }
     log(`@${username} connect failed:`, err?.constructor?.name, String(err?.message ?? err).slice(0, 200));
     const result = connectionFailure(err, username, c.roomInfo, err instanceof UserOfflineError);
+    s.offline.observe(err instanceof UserOfflineError ? false : null);
     setStatus(s.job.user_id, result.status, result.message);
     s.retryAt = Date.now() + result.retryMs;
   });
@@ -228,7 +235,7 @@ function connect(s) {
   c.on(WebcastEvent.LIKE, (d) => { seeViewer(d?.user);
     if (s.stopped || s.conn !== c || !c.isConnected) return;
     const like = liveLike(d); if (!like) return;
-    if (like.eventId) post(s, "/api/public/events", { type: "like", username: handleOf(d), sender_user_id: like.sender, likes: like.count, event_id: like.eventId, live_generation: s.generation });
+    if (like.eventId) post(s, "/api/public/events", { type: "like", username: handleOf(d), sender_user_id: like.sender, likes: like.count, event_id: like.eventId, live_generation: s.generation, ...likeMetadata(d) });
     s.likeBuf += like.count; if (s.likeTimer) return;
     s.likeTimer = setTimeout(() => { s.likeTimer = null; const n = s.likeBuf; s.likeBuf = 0; get(s, "/api/public/goal", { type: "like", count: String(n) }); }, 800);
   });
@@ -313,7 +320,23 @@ async function tick() {
       if (!j || j.username !== s.job.username || j.api_key !== s.job.api_key || j.revision !== s.job.revision) stop(id);
     }
     for (const j of jobs) if (!sessions.has(j.user_id)) start(j);
-    for (const s of sessions.values()) if (s.retryAt && Date.now() >= s.retryAt) { s.retryAt = 0; try { s.conn?.disconnect(); } catch {} connect(s); }
+    for (const s of sessions.values()) {
+      if (s.conn?.isConnected) { s.offline.observe(true); continue; }
+      if (s.offline.due()) {
+        // Recheck directly before disabling: an open socket/error can never expire a creator.
+        const live = await s.conn?.fetchIsLive().catch(() => null);
+        if (s.stopped || sessions.get(s.job.user_id) !== s || s.conn?.isConnected) continue;
+        s.offline.observe(live);
+        if (live === false && s.offline.due()) {
+          setStatus(s.job.user_id,'waiting','Not LIVE for 10 minutes. Turning connection off.');
+          await flushStatus();
+          const response = await api('POST',{offlineDisconnect:{user_id:s.job.user_id,username:s.job.username,revision:s.job.revision,offline_since:new Date(s.offline.since()).toISOString()}});
+          if (response.disconnected) { stop(s.job.user_id); log('Cloud connection turned off after 10 minutes confirmed offline'); }
+          continue;
+        }
+      }
+      if (s.retryAt && Date.now() >= s.retryAt) { s.retryAt = 0; try { s.conn?.disconnect(); } catch {} connect(s); }
+    }
   } catch (e) { log("tick failed", e.message); }
   for (const x of sessions.values()) {
     if (x.status?.status === 'live' && !x.conn?.isConnected) {
