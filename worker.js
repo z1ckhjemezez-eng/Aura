@@ -9,7 +9,7 @@ import { verifiedLive, connectionFailure, ownerObserved } from './connection-sta
 import { createLiveGate } from './live-session.js';
 import { normalizeLevelBarrage,createLevelDelivery,createLevelSnapshots } from './levels.js';
 import { WORKER_BUILD } from './build-info.js';
-import { liveLike, giftStreakId, senderId, likeMetadata } from './live-events.js';
+import { liveLike, giftStreakId, senderId, likeMetadata, profileAvatar, giftRecipientFields } from './live-events.js';
 import { createScout } from './scout.js';
 import { createBattleDiagnostics } from './battle-diagnostics.js';
 import { createSpeedChallenge } from './speed-challenge.js';
@@ -42,7 +42,7 @@ async function api(method, body) {
   if (!r.ok) throw new Error(`AuraTok ${r.status}`);
   return r.json();
 }
-const avatarOf = (u) => u?.profilePicture?.urls?.[0] || u?.avatarThumb?.urlList?.[0] || "";
+const avatarOf = profileAvatar;
 const handleOf = (d) => { const u = d.user || {}; return u.uniqueId || u.displayId || u.username || d.uniqueId || u.nickname || d.nickname || "viewer"; };
 const BATTLE = WebcastEvent.LINK_MIC_BATTLE ?? "linkMicBattle";
 const ARMIES = WebcastEvent.LINK_MIC_ARMIES ?? "linkMicArmies";
@@ -222,6 +222,7 @@ function connect(s) {
     const giftParams = {
       user: handleOf(d), nickname: d.user?.nickname || "", gift: d.giftName || g.name || g.giftName || "",
       sender_user_id: senderId(d),
+      ...giftRecipientFields(d, tracker.status().hostId || s.hostId),
       gift_id: String(d.giftId ?? g.id ?? ""), quantity: String(qty), coins: String(Number(per ?? 1) * qty),
       diamonds: per !== undefined ? String(per) : "", avatar: avatarOf(d.user), event_id: String(d.msgId ?? d.common?.msgId ?? ""),
       gift_icon: d.giftPictureUrl || g.image?.urlList?.[0] || "", gift_type: String(giftType), repeat_end: repeatEnd ? "true" : "false",
