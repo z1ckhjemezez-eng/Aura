@@ -16,6 +16,7 @@ import { createSpeedChallenge } from './speed-challenge.js';
 import { createStatusDelivery } from './status-delivery.js';
 import { createConnectBudget, isSignRateLimit, rateLimitMessage } from './connect-budget.js';
 import { createOfflineTimeout } from './offline-timeout.js';
+import { activeStreakEvent } from './streak-events.js';
 
 const base = String(process.env.AURATOK_URL || "https://auratok.com").replace(/\/+$/, "");
 const secret = process.env.WORKER_SECRET || "";
@@ -207,7 +208,7 @@ function connect(s) {
   c.on(WebcastEvent.CHAT, (d) => { seeViewer(d?.user);
     if (s.stopped || s.conn !== c || !c.isConnected) return;
     const msg = String(d.content ?? d.comment ?? "").trim(); if (!msg) return;
-    get(s, "/api/public/chat", { user: handleOf(d), msg, event_id: String(d.msgId ?? d.common?.msgId ?? ""), avatar: avatarOf(d.user), isFollower: Number(d.user?.followRole ?? 0) >= 1 ? "1" : "0", isSubscriber: d.user?.isSubscriber ? "1" : "0", isModerator: d.user?.isModerator ? "1" : "0" });
+    get(s, "/api/public/chat", { user: handleOf(d), nickname: d.user?.nickname || "", msg, event_id: String(d.msgId ?? d.common?.msgId ?? ""), avatar: avatarOf(d.user), isFollower: Number(d.user?.followRole ?? 0) >= 1 ? "1" : "0", isSubscriber: d.user?.isSubscriber ? "1" : "0", isModerator: d.user?.isModerator ? "1" : "0" });
   });
   c.on(WebcastEvent.BARRAGE??'barrage',d=>{if(s.stopped||s.conn!==c||!c.isConnected)return;s.levelSnaps.noteBarrage(d?.msgType);const body=normalizeLevelBarrage(d,c.roomId??s.roomId,log);if(body)void s.levels?.enqueue(body);});
   c.on(WebcastEvent.GIFT, (d) => { seeViewer(d?.user);
@@ -215,7 +216,11 @@ function connect(s) {
     const g = d.giftDetails || d.gift || {};
     const giftType = Number(d.giftType ?? g.type ?? g.giftType ?? 0);
     const repeatEnd = d.repeatEnd === true || Number(d.repeatEnd) === 1;
-    if (giftType === 1 && !repeatEnd) return;
+    if (giftType === 1 && !repeatEnd) {
+      const active = activeStreakEvent(d, c.roomId || s.roomId, tracker.status().hostId || s.hostId);
+      if (active) void post(s, '/api/public/events', active);
+      return;
+    }
     const qty = Math.max(1, Number(d.repeatCount || d.comboCount || 1));
     const per = d.diamondCount ?? g.diamondCount;
     const battleId = tracker.status().battleId;
