@@ -26,7 +26,9 @@ const log = (...a) => console.log(new Date().toISOString(), ...a);
 // The LIVE pre-check only asks TikTok directly, so offline creators never use signing quota.
 if (IsLiveRouteConfig) IsLiveRouteConfig.skipFetchRoomIdFromEulerRoute = true;
 const budget = createConnectBudget();
-const OFFLINE_FULL_CHECK_MS = 5 * 60_000;
+const OFFLINE_FULL_CHECK_MS = 2 * 60_000;
+// Cheap LIVE pre-checks retry quickly so a creator who goes LIVE after turning on is picked up without toggling.
+const OFFLINE_RECHECK_MS = 15_000;
 
 const sessions = new Map(); // user_id -> session
 const pending = new Map();  // user_id -> {status,message}
@@ -202,7 +204,7 @@ function connect(s) {
     const result = connectionFailure(err, username, c.roomInfo, err instanceof UserOfflineError);
     s.offline.observe(err instanceof UserOfflineError ? false : null);
     setStatus(s.job.user_id, result.status, result.message);
-    s.retryAt = Date.now() + result.retryMs;
+    s.retryAt = Date.now() + (err instanceof UserOfflineError ? OFFLINE_RECHECK_MS : result.retryMs);
   });
   c.on(ControlEvent.DISCONNECTED, () => { if (!s.stopped && s.conn === c) { s.gate.cancel(); s.booster.disconnected(); setStatus(s.job.user_id, "connecting", "LIVE disconnected. Reconnecting — not connected."); s.retryAt = Date.now() + 30_000; } });
   c.on(WebcastEvent.CHAT, (d) => { seeViewer(d?.user);

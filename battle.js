@@ -47,7 +47,7 @@ export function scanLeague(obj, out = {}, depth = 0) {
 export function createBattleTracker(options = {}) {
   const {
     username = "", log = () => {}, post = async () => {}, postLeague = async () => {},
-    interval = 1000, endDelay = 300,
+    interval = 0, endDelay = 300,
   } = options;
   const name = String(username).replace(/^@/, "").trim().toLowerCase();
 
@@ -114,6 +114,11 @@ export function createBattleTracker(options = {}) {
   }
 
   function scheduleUpdate() {
+    if (interval <= 0) {
+      if (battle) void post({ event: "update", battleId: battle.id, ourScore: battle.our, opponentScore: battle.opp,
+        opponent, mode, contributors: [...battle.contributors.values()] });
+      return;
+    }
     if (sendTimer) return;
     sendTimer = setTimeout(() => {
       sendTimer = null;

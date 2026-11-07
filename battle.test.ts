@@ -37,6 +37,14 @@ function harness(options = {}) {
 }
 
 describe("cloud battle tracker", () => {
+  it('forwards successive official score snapshots immediately without the old one-second batch', () => {
+    const { tracker, of } = harness({ interval: undefined });
+    tracker.onBattleMessage(open());
+    tracker.onArmiesMessage(armies('555', 300, 900));
+    tracker.onArmiesMessage(armies('555', 450, 1200));
+    expect(of('update').map(p => [p.ourScore, p.opponentScore])).toEqual([[300,900],[450,1200]]);
+    tracker.stop();
+  });
   it('keeps showing the opponent score when Sky hides their total', () => {
     const { tracker } = harness();
     tracker.onBattleMessage(open());
