@@ -18,6 +18,7 @@ import { createStatusDelivery } from './status-delivery.js';
 import { createConnectBudget, isSignRateLimit, rateLimitMessage } from './connect-budget.js';
 import { createOfflineTimeout } from './offline-timeout.js';
 import { activeStreakEvent } from './streak-events.js';
+import { createLikeDelivery } from './like-delivery.js';
 
 const base = String(process.env.AURATOK_URL || "https://auratok.com").replace(/\/+$/, "");
 const secret = process.env.WORKER_SECRET || "";
@@ -85,6 +86,7 @@ function stop(id) {
   try { s.tracker?.stop(); } catch {}
   try { s.conn?.removeAllListeners(); s.conn?.disconnect(); } catch {}
   if (s.likeTimer) clearTimeout(s.likeTimer);
+  s.likeDelivery?.close();
   sessions.delete(id); pending.delete(id);
 }
 async function get(s, path, params) {
@@ -121,6 +123,8 @@ function connect(s) {
     return;
   }
   const attempt = s.gate.begin();
+  s.likeDelivery?.close();
+  s.likeDelivery = createLikeDelivery({send: count => get(s, '/api/public/goal', {type:'like',count:String(count)}),onError:()=>log('Like delivery failed')});
   if (s.likeTimer) clearTimeout(s.likeTimer);
   s.likeTimer = null; s.likeBuf = 0;
   s.booster.disconnected();
@@ -244,8 +248,7 @@ function connect(s) {
     if (s.stopped || s.conn !== c || !c.isConnected) return;
     const like = liveLike(d); if (!like) return;
     if (like.eventId) post(s, "/api/public/events", { type: "like", username: handleOf(d), sender_user_id: like.sender, likes: like.count, event_id: like.eventId, live_generation: s.generation, ...likeMetadata(d) });
-    s.likeBuf += like.count; if (s.likeTimer) return;
-    s.likeTimer = setTimeout(() => { s.likeTimer = null; const n = s.likeBuf; s.likeBuf = 0; get(s, "/api/public/goal", { type: "like", count: String(n) }); }, 800);
+    s.likeDelivery.add(like.count);
   });
   c.on(WebcastEvent.MEMBER ?? 'member', (d) => {seeViewer(d?.user);if(s.stopped||s.conn!==c||!c.isConnected)return;const act=Number(d?.action??1);if(act!==1&&act!==0)return;const identity=senderId(d);const username=d.user?.uniqueId||d.user?.displayId||d.uniqueId;if(!identity&&!username)return;void post(s,'/api/public/events',{type:'join',username:String(username||''),sender_user_id:identity,event_id:String(d.msgId??d.common?.msgId??'')});});
   c.on(WebcastEvent.FOLLOW, (d) => get(s, "/api/public/goal", { type: "follow", count: "1", user: handleOf(d), event_id: String(d.msgId ?? d.common?.msgId ?? "") }));
@@ -253,12 +256,6 @@ function connect(s) {
   c.on(BATTLE, (m) => tracker.onBattleMessage(m));
   c.on(ARMIES, (m) => tracker.onArmiesMessage(m));
   c.on(WebcastEvent.LINK_MIC_BATTLE_ITEM_CARD ?? 'linkMicBattleItemCard', m => { s.booster.setCreator(tracker.status().hostId); s.booster.observe('WebcastLinkMicBattleItemCard', m); probeMessage(s, 'WebcastLinkMicBattleItemCard', m); });
-  c.on("decodedData", (raw, decoded) => {
-    const type = decoded?.type ?? raw?.type ?? raw;
-    const data = decoded?.data ?? decoded ?? raw?.data;
-    tracker.onDecoded(type, data);
-    if (data?.user) seeViewer(data.user);
-  });
   const seeViewer = (u) => {
     if (!s.stopped && s.conn === c && c.isConnected && s.roomId && u && !(s.lastSeen === u)) {
       s.lastSeen = u;

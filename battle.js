@@ -56,6 +56,7 @@ export function createBattleTracker(options = {}) {
   let battle = null;              // { id, our, opp, contributors: Map }
   let sendTimer = null;
   let endTimer = null;
+  let pendingFinish = null;
   let opponent = null;            // { username, displayName, avatar } — from real battle data only
   let mode = null;                // battle mode metadata, only if TikTok sends it
   let lastBattleMsg = null;
@@ -108,6 +109,10 @@ export function createBattleTracker(options = {}) {
 
   function startBattle(id) {
     if (battle?.id === id || endedIds.has(id)) return;
+    if (battle) {
+      if(pendingFinish) { if(endTimer)clearTimeout(endTimer);pendingFinish(); }
+      else { endedIds.add(battle.id); if(endedIds.size>100)endedIds.delete(endedIds.values().next().value); }
+    }
     if (endTimer) { clearTimeout(endTimer); endTimer = null; }
     battle = { id, our: 0, opp: 0, contributors: new Map() };
     opponent = null; mode = null;
@@ -134,6 +139,8 @@ export function createBattleTracker(options = {}) {
 
   function applyArmies(battleId, armiesRaw, teamArmies) {
     if (!battleId) return;
+    // Army-only traffic may bootstrap an attached room, not replace an explicitly opened match.
+    if(battle && battle.id !== String(battleId)) return;
     startBattle(String(battleId));
     if (!battle || battle.id !== String(battleId)) return; // Never mix a previous battle into the current one.
 
@@ -175,6 +182,7 @@ export function createBattleTracker(options = {}) {
     if (!battle || (id && battle.id !== String(id)) || endTimer) return;
     const finish = () => {
       endTimer = null;
+      pendingFinish = null;
       if (!battle || (id && battle.id !== String(id))) return;
       const b = battle; battle = null;
       if (endedIds.size > 100) endedIds.delete(endedIds.values().next().value);
@@ -188,12 +196,13 @@ export function createBattleTracker(options = {}) {
         opponent, mode, contributors: [...b.contributors.values()], resultConfirmed,
       });
     };
-    if (endDelay > 0) { endTimer = setTimeout(finish, endDelay); }
+    if (endDelay > 0) { pendingFinish=finish;endTimer = setTimeout(finish, endDelay); }
     else finish();
   }
 
   function onBattleMessage(m) {
     if (!m || typeof m !== "object") return;
+    if(m.battleId && endedIds.has(String(m.battleId)))return;
     if (!hostId) hostId = findOwnId(m);
     lastBattleMsg = m;
     if (battle || m.action === ACTION_OPEN) {
@@ -239,6 +248,7 @@ export function createBattleTracker(options = {}) {
   function stop() {
     if (sendTimer) { clearTimeout(sendTimer); sendTimer = null; }
     if (endTimer) { clearTimeout(endTimer); endTimer = null; }
+    pendingFinish=null;
     battle = null; opponent = null; mode = null; lastBattleMsg = null;
   }
 
