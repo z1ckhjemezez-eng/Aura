@@ -37,6 +37,9 @@ A health endpoint answers on `$PORT` so the service also works as a Render web s
 
 ## New version
 
+### Battle point parsing `2026.11.09-battle-points.1`
+Reads both current `hostscore` and legacy `hostScore` totals, preserving explicit zero. Team battle totals take precedence when individual armies are also present, with exact host membership. Scores are provider battle points, not `diamondScore`/gift coins; already-applied ×2/×3/glove bonuses are never multiplied again. Include `battle-score.js` when redeploying the full folder. The standalone Battle Helper includes the same parser. Synthetic regression tests pass; an affected real boosted LIVE battle and external deployment are not verified. Hidden-score supporter fallback remains unchanged apart from explicit-zero handling.
+
 ### Offline timeout `2026.10.31-offline-timeout.1`
 Connections turn off after 10 continuous minutes of confirmed offline observations. A fresh direct TikTok check runs before disabling; active LIVE, uncertain errors and new connection requests cannot be expired by an old report. The creator can press Connect again; usernames, settings and history remain saved. Publish AuraTok and redeploy the full Render folder, including `offline-timeout.js`. No new environment variables are required. A worker restart safely restarts the observation window.
 

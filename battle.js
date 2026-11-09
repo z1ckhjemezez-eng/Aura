@@ -1,6 +1,7 @@
 // AuraTok battle tracking — pure logic, no imports, safe to unit test.
 // Turns raw TikTok LIVE battle messages into AuraTok battle/league posts.
 // Nothing is guessed: scores and contributors only come from TikTok's own battle fields.
+import { officialArmyScore, armySupporters, teamHasHost } from './battle-score.js';
 
 const ACTION_OPEN = 4, ACTION_FINISH = 5, ACTION_CUT_SHORT = 6;
 const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
@@ -96,7 +97,7 @@ export function createBattleTracker(options = {}) {
   }
 
   function contributorsOf(armies) {
-    return (armies?.userArmies ?? []).map((u) => ({
+    return armySupporters(armies).map((u) => ({
       userId: String(u.userIdStr || u.userId || ""),
       username: u.nickname || String(u.userIdStr || u.userId),
       displayName: u.nickname || null,
@@ -142,15 +143,16 @@ export function createBattleTracker(options = {}) {
       if (hostId && (id === hostId || key === hostId)) ours = a;
       else {
         // Sky/fog hides the opponent total for the host: fall back to the sum of their visible supporters.
-        const visible = num(a?.hostscore) || (a?.userArmies ?? []).reduce((t, u) => t + num(u?.score), 0);
+        const visible = officialArmyScore(a) ?? armySupporters(a).reduce((t, u) => t + num(u?.score), 0);
         if (visible >= oppScore) { oppScore = visible; oppId = id; }
       }
     }
     if (!opponent && oppId && lastBattleMsg) opponent = findUser(lastBattleMsg, oppId);
     // Team (2v2) battles: use the team that contains our host.
-    if (!ours && Array.isArray(teamArmies) && hostId) {
+    if (Array.isArray(teamArmies) && hostId && teamArmies.some(t => teamHasHost(t, hostId))) {
+      oppScore = 0;
       for (const t of teamArmies) {
-        const has = String(t?.userArmies?.anchorIdStr || "") === hostId || JSON.stringify(t?.teamUser || []).includes(hostId);
+        const has = teamHasHost(t, hostId);
         if (has) ours = { ...t.userArmies, hostscore: t.teamTotalScore };
         else oppScore = Math.max(oppScore, num(t?.teamTotalScore));
       }
@@ -159,7 +161,7 @@ export function createBattleTracker(options = {}) {
     // Keep the score card alive even when one side is hidden (Sky): scores never drop, missing sides keep their last value.
     battle.opp = Math.max(battle.opp, oppScore);
     if (!ours) { scheduleUpdate(); return; }
-    battle.our = Math.max(battle.our, num(ours.hostscore) || contributorsOf(ours).reduce((t, c) => t + c.points, 0));
+    battle.our = Math.max(battle.our, officialArmyScore(ours) ?? contributorsOf(ours).reduce((t, c) => t + c.points, 0));
     for (const c of contributorsOf(ours)) {
       const identity = c.userId || c.username;
       const old = battle.contributors.get(identity);
@@ -203,7 +205,7 @@ export function createBattleTracker(options = {}) {
     const entries=Object.entries(map);
     const own=entries.find(([key,a])=>String(a?.anchorIdStr||key)===hostId);
     const other=entries.filter(([key,a])=>String(a?.anchorIdStr||key)!==hostId);
-    const explicit=a=>a&&a.hostscore!==undefined&&Number.isSafeInteger(Number(a.hostscore))&&Number(a.hostscore)>=0;
+    const explicit=a=>officialArmyScore(a)!==undefined;
     const confirmed=m.action===ACTION_FINISH&&!!hostId&&explicit(own?.[1])&&other.length===1&&explicit(other[0]?.[1]);
     if (m.action === ACTION_FINISH || m.action === ACTION_CUT_SHORT) endBattle(m.battleId,confirmed);
   }
