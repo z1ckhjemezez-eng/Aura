@@ -4,6 +4,7 @@
 // fragments are tracked here too, so a cloud connection needs no extra program.
 import { TikTokLiveConnection, WebcastEvent, ControlEvent, UserOfflineError, IsLiveRouteConfig } from "tiktok-live-connector";
 import { createBattleTracker } from "./battle.js";
+import { createBattleDelivery } from './battle-delivery.js';
 import { createBoosterCollector } from "./boosters.js";
 import { verifiedLive, connectionFailure, ownerObserved } from './connection-status.js';
 import { createLiveGate } from './live-session.js';
@@ -51,7 +52,7 @@ const BATTLE = WebcastEvent.LINK_MIC_BATTLE ?? "linkMicBattle";
 const ARMIES = WebcastEvent.LINK_MIC_ARMIES ?? "linkMicArmies";
 
 function start(job) {
-  const s = { job, conn: null, tracker: null, retryAt: 0, likeBuf: 0, likeTimer: null, stopped: false, booster: null, battleDelivery: Promise.resolve(), gate: createLiveGate(), inFlight: new Set(), levels:null, roomId:null, hostId:null };
+  const s = { job, conn: null, tracker: null, retryAt: 0, likeBuf: 0, likeTimer: null, stopped: false, booster: null, battleDelivery: createBattleDelivery({onError:()=>log('Battle delivery failed')}), gate: createLiveGate(), inFlight: new Set(), levels:null, roomId:null, hostId:null };
   s.offline = createOfflineTimeout();
   const tag=`@${String(job.tiktok_username||job.username||'').replace(/^@/,'')}`;
   s.levelSnaps=createLevelSnapshots({log:m=>log(`${tag} ${m}`)});
@@ -105,10 +106,9 @@ async function postAs(s, path, body) {
 }
 
 // Preserve socket order: start persists before gifts; end waits for all received battle gifts.
-function deliverBattle(s, send) {
+function deliverBattle(s, send, scoreKey = null) {
   const token = s.gate.token();
-  s.battleDelivery = s.battleDelivery.then(async () => s.stopped || !await s.gate.wait(token) ? undefined : send()).catch(() => log('Battle delivery failed'));
-  return s.battleDelivery;
+  return s.battleDelivery.enqueue(async () => s.stopped || !await s.gate.wait(token) ? undefined : send(), scoreKey ? `${token}:${scoreKey}` : null);
 }
 
 function connect(s) {
@@ -131,7 +131,7 @@ function connect(s) {
   s.tracker = createBattleTracker({
     username,
     log: (m) => log(`@${username}`, m),
-    post: (body) => deliverBattle(s, () => postAs(s, "/api/public/battle", body)),
+    post: (body) => deliverBattle(s, () => postAs(s, "/api/public/battle", body), body.event === 'update' ? body.battleId : null),
     postLeague: (body) => postAs(s, "/api/public/league", body),
   });
   const tracker = s.tracker;

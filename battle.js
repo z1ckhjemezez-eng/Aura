@@ -108,6 +108,7 @@ export function createBattleTracker(options = {}) {
 
   function startBattle(id) {
     if (battle?.id === id || endedIds.has(id)) return;
+    if (endTimer) { clearTimeout(endTimer); endTimer = null; }
     battle = { id, our: 0, opp: 0, contributors: new Map() };
     opponent = null; mode = null;
     log(`battle started (id ${id})`);
@@ -171,6 +172,7 @@ export function createBattleTracker(options = {}) {
   }
 
   function endBattle(id, resultConfirmed=false) {
+    if (!battle || (id && battle.id !== String(id)) || endTimer) return;
     const finish = () => {
       endTimer = null;
       if (!battle || (id && battle.id !== String(id))) return;
@@ -186,7 +188,7 @@ export function createBattleTracker(options = {}) {
         opponent, mode, contributors: [...b.contributors.values()], resultConfirmed,
       });
     };
-    if (endDelay > 0) { if (endTimer) clearTimeout(endTimer); endTimer = setTimeout(finish, endDelay); }
+    if (endDelay > 0) { endTimer = setTimeout(finish, endDelay); }
     else finish();
   }
 

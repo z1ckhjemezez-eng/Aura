@@ -37,6 +37,9 @@ A health endpoint answers on `$PORT` so the service also works as a Render web s
 
 ## New version
 
+### MVP delivery `2026.11.09-mvp-delivery.1`
+Repeated finish messages no longer reset the first 300ms final-army collection deadline. Pending cumulative scores coalesce only within the same battle/generation and never across gifts, start or end; every gift retains ordered delivery. HTTP gift barriers are not aborted to advance end while server persistence may still be running. Include `battle-delivery.js` and redeploy the whole folder. This removes reproduced scheduling/backlog hazards, not upstream TikTok or slow gift-processing latency; actual LIVE end-to-overlay delay remains unverified.
+
 ### Battle point parsing `2026.11.09-battle-points.1`
 Reads both current `hostscore` and legacy `hostScore` totals, preserving explicit zero. Team battle totals take precedence when individual armies are also present, with exact host membership. Scores are provider battle points, not `diamondScore`/gift coins; already-applied ×2/×3/glove bonuses are never multiplied again. Include `battle-score.js` when redeploying the full folder. The standalone Battle Helper includes the same parser. Synthetic regression tests pass; an affected real boosted LIVE battle and external deployment are not verified. Hidden-score supporter fallback remains unchanged apart from explicit-zero handling.
 
