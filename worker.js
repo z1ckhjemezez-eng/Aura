@@ -259,7 +259,8 @@ function connect(s) {
     s.likeDelivery.add(like.count);
   });
   const joins = createJoinNormalizer(); // Socket-local: never carry identities into another room.
-  c.on(WebcastEvent.MEMBER ?? 'member', (d) => {seeViewer(d?.user);if(s.stopped||s.conn!==c||!c.isConnected)return;const event=joins.join(d);if(event)void post(s,'/api/public/events',event);});
+  const joinStats={seen:0,sent:0,anon:0};const joinTimer=setInterval(()=>{if(s.conn!==c||s.stopped){clearInterval(joinTimer);return;}if(joinStats.seen)log(`[vip-join] @${username} last 5 min: ${joinStats.seen} joins seen, ${joinStats.sent} forwarded, ${joinStats.anon} without handle`);joinStats.seen=joinStats.sent=joinStats.anon=0;},300_000);joinTimer.unref?.();
+  c.on(WebcastEvent.MEMBER ?? 'member', (d) => {seeViewer(d?.user);if(s.stopped||s.conn!==c||!c.isConnected)return;joinStats.seen++;const event=joins.join(d);if(!event){joinStats.anon++;return;}joinStats.sent++;void post(s,'/api/public/events',event);});
   c.on(WebcastEvent.FOLLOW, (d) => get(s, "/api/public/goal", { type: "follow", count: "1", user: handleOf(d), event_id: String(d.msgId ?? d.common?.msgId ?? "") }));
   c.on(WebcastEvent.SHARE, (d) => post(s, "/api/public/events", { type: "share", username: handleOf(d), event_id: String(d.msgId ?? d.common?.msgId ?? "") }));
   c.on(BATTLE, (m) => tracker.onBattleMessage(m));
