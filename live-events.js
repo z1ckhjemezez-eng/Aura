@@ -9,6 +9,31 @@ export function giftRecipientFields(d, hostId) {
 }
 export const senderId = d => positiveId(d.user?.userId, d.user?.idStr, d.user?.id, d.userId);
 export const messageId = d => positiveId(d.msgId, d.common?.msgId);
+/** Join identities may live in display text or arrive ID-only after a full user observation. */
+export function createJoinNormalizer() {
+  const viewers = new Map();
+  const handle = u => [u?.uniqueId, u?.displayId, u?.username].find(v => typeof v === 'string' && v.trim())?.trim().replace(/^@/, '').slice(0,64) || '';
+  function observe(user) {
+    const id = senderId({user});
+    if (!id || !handle(user)) return;
+    viewers.delete(id); viewers.set(id, user);
+    if (viewers.size > 5000) viewers.delete(viewers.keys().next().value);
+  }
+  function join(d) {
+    const action = Number(d?.action ?? 1);
+    if (action !== 0 && action !== 1) return null;
+    const id = senderId(d);
+    const pieces = d?.common?.displayText?.pieces;
+    const textUser = id && Array.isArray(pieces) ? pieces.map(p => p?.userValue?.user).find(u => senderId({user:u}) === id && handle(u)) : undefined;
+    const user = handle(d?.user) ? d.user : textUser || viewers.get(id);
+    const username = handle(user) || handle(d);
+    if (!username) return null; // Nicknames are not account identities.
+    observe(user);
+    const avatar = profileAvatar(user) || profileAvatar(d);
+    return {type:'join',username,sender_user_id:id,event_id:messageId(d),display_name:String(user?.nickname || d?.nickname || '').slice(0,100),...(avatar?{avatar_url:avatar}:{})};
+  }
+  return {observe,join};
+}
 /** Connector raw and legacy images; only forward observed secure URLs. */
 export function profileAvatar(user) {
   const images=[user?.avatarLarge,user?.avatarMedium,user?.profilePicture,user?.avatarThumb];

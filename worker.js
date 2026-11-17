@@ -10,7 +10,7 @@ import { verifiedLive, connectionFailure, ownerObserved } from './connection-sta
 import { createLiveGate } from './live-session.js';
 import { normalizeLevelBarrage,createLevelDelivery,createLevelSnapshots } from './levels.js';
 import { WORKER_BUILD } from './build-info.js';
-import { liveLike, giftStreakId, senderId, likeMetadata, profileAvatar, giftRecipientFields } from './live-events.js';
+import { liveLike, giftStreakId, senderId, likeMetadata, profileAvatar, giftRecipientFields, createJoinNormalizer } from './live-events.js';
 import { createScout } from './scout.js';
 import { createBattleDiagnostics } from './battle-diagnostics.js';
 import { createSpeedChallenge } from './speed-challenge.js';
@@ -92,6 +92,12 @@ function stop(id) {
 async function get(s, path, params) {
   return forward(s, () => fetch(`${base}${path}?${new URLSearchParams({ key: s.job.api_key, ...params, live_generation:s.generation })}`));
 }
+/** Throws unless the server acknowledged the batch, so the delivery queue retries with the same batch id. */
+async function sendLikeBatch(s, count, batchId) {
+  if (s.stopped) return;
+  const r = await fetch(`${base}/api/public/goal?${new URLSearchParams({ key: s.job.api_key, type: 'like', count: String(count), batch_id: batchId, live_generation: s.generation })}`);
+  if (!r.ok) throw new Error(`Like batch replied ${r.status}`);
+}
 async function post(s, path, body) {
   return forward(s, () => fetch(`${base}${path}`, { method: "POST", headers: { "Content-Type": "application/json", "x-api-key": s.job.api_key }, body: JSON.stringify({...body, ...(path === '/api/public/events' ? {live_generation: s.generation} : {})}) }));
 }
@@ -124,7 +130,7 @@ function connect(s) {
   }
   const attempt = s.gate.begin();
   s.likeDelivery?.close();
-  s.likeDelivery = createLikeDelivery({send: count => get(s, '/api/public/goal', {type:'like',count:String(count)}),onError:()=>log('Like delivery failed')});
+  s.likeDelivery = createLikeDelivery({prefix:`lk-${String(s.generation??'g').slice(0,36)}`,send: (count, batchId) => sendLikeBatch(s, count, batchId),onError:()=>log('Like delivery failed')});
   if (s.likeTimer) clearTimeout(s.likeTimer);
   s.likeTimer = null; s.likeBuf = 0;
   s.booster.disconnected();
@@ -142,11 +148,13 @@ function connect(s) {
   const opts = { enableExtendedGiftInfo: false }; if (signApiKey) opts.signApiKey = signApiKey;
   const c = new TikTokLiveConnection(username, opts); s.conn = c;
   const run = async () => {
-    // Cheap pre-check without the signing service; a full connect still runs at least every 5 min.
+    // Cheap pre-check without the signing service; full connects only for LIVE (or unknown) creators.
     const live = await c.fetchIsLive().catch(() => null);
     if (s.stopped || s.conn !== c) throw new Error('Connection attempt superseded');
     s.offline.observe(live);
-    if (live === false && Date.now() - (s.lastFullConnectAt ?? 0) < OFFLINE_FULL_CHECK_MS) throw new UserOfflineError("The requested user isn't online :(");
+    // Confirmed offline never spends signing quota; an unknown pre-check result full-connects at most every 2 min.
+    if (live === false) throw new UserOfflineError("The requested user isn't online :(");
+    if (live !== true && Date.now() - (s.lastFullConnectAt ?? 0) < OFFLINE_FULL_CHECK_MS) throw new UserOfflineError("LIVE status unknown — rechecking shortly");
     s.lastFullConnectAt = Date.now();
     return c.connect();
   };
@@ -250,7 +258,8 @@ function connect(s) {
     if (like.eventId) post(s, "/api/public/events", { type: "like", username: handleOf(d), sender_user_id: like.sender, likes: like.count, event_id: like.eventId, live_generation: s.generation, ...likeMetadata(d) });
     s.likeDelivery.add(like.count);
   });
-  c.on(WebcastEvent.MEMBER ?? 'member', (d) => {seeViewer(d?.user);if(s.stopped||s.conn!==c||!c.isConnected)return;const act=Number(d?.action??1);if(act!==1&&act!==0)return;const identity=senderId(d);const username=d.user?.uniqueId||d.user?.displayId||d.uniqueId;if(!identity&&!username)return;void post(s,'/api/public/events',{type:'join',username:String(username||''),sender_user_id:identity,event_id:String(d.msgId??d.common?.msgId??'')});});
+  const joins = createJoinNormalizer(); // Socket-local: never carry identities into another room.
+  c.on(WebcastEvent.MEMBER ?? 'member', (d) => {seeViewer(d?.user);if(s.stopped||s.conn!==c||!c.isConnected)return;const event=joins.join(d);if(event)void post(s,'/api/public/events',event);});
   c.on(WebcastEvent.FOLLOW, (d) => get(s, "/api/public/goal", { type: "follow", count: "1", user: handleOf(d), event_id: String(d.msgId ?? d.common?.msgId ?? "") }));
   c.on(WebcastEvent.SHARE, (d) => post(s, "/api/public/events", { type: "share", username: handleOf(d), event_id: String(d.msgId ?? d.common?.msgId ?? "") }));
   c.on(BATTLE, (m) => tracker.onBattleMessage(m));
@@ -258,6 +267,7 @@ function connect(s) {
   c.on(WebcastEvent.LINK_MIC_BATTLE_ITEM_CARD ?? 'linkMicBattleItemCard', m => { s.booster.setCreator(tracker.status().hostId); s.booster.observe('WebcastLinkMicBattleItemCard', m); probeMessage(s, 'WebcastLinkMicBattleItemCard', m); });
   const seeViewer = (u) => {
     if (!s.stopped && s.conn === c && c.isConnected && s.roomId && u && !(s.lastSeen === u)) {
+      joins.observe(u);
       s.lastSeen = u;
       if (!s.hostId && String(u.uniqueId || u.displayId || '').toLowerCase() === username.toLowerCase()) s.hostId = [u.userId, u.idStr, u.id].map(v => String(v ?? '')).find(v => /^\d{5,30}$/.test(v)) || null;
       for (const body of s.levelSnaps.observe(u, s.roomId, tracker.status().hostId || s.hostId)) void s.levels?.enqueue(body);
