@@ -1,2 +1,2 @@
 // Change this identifier whenever the downloadable worker changes.
-export const WORKER_BUILD = '2026.11.17-vip-join.2';
+export const WORKER_BUILD = '2026.11.24-gift-lag.1';

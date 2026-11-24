@@ -222,11 +222,18 @@ function connect(s) {
   c.on(WebcastEvent.CHAT, (d) => { seeViewer(d?.user);
     if (s.stopped || s.conn !== c || !c.isConnected) return;
     const msg = String(d.content ?? d.comment ?? "").trim(); if (!msg) return;
-    get(s, "/api/public/chat", { user: handleOf(d), nickname: d.user?.nickname || "", msg, event_id: String(d.msgId ?? d.common?.msgId ?? ""), avatar: avatarOf(d.user), isFollower: Number(d.user?.followRole ?? 0) >= 1 ? "1" : "0", isSubscriber: d.user?.isSubscriber ? "1" : "0", isModerator: d.user?.isModerator ? "1" : "0" });
+    get(s, "/api/public/chat", { user: handleOf(d), sender_user_id: senderId(d), live_generation: s.generation || '', nickname: d.user?.nickname || "", msg, event_id: String(d.msgId ?? d.common?.msgId ?? ""), avatar: avatarOf(d.user), isFollower: Number(d.user?.followRole ?? 0) >= 1 ? "1" : "0", isSubscriber: d.user?.isSubscriber ? "1" : "0", isModerator: d.user?.isModerator ? "1" : "0" });
   });
   c.on(WebcastEvent.BARRAGE??'barrage',d=>{if(s.stopped||s.conn!==c||!c.isConnected)return;s.levelSnaps.noteBarrage(d?.msgType);const body=normalizeLevelBarrage(d,c.roomId??s.roomId,log);if(body)void s.levels?.enqueue(body);});
+  // [gift-lag] numbers only: TikTok->worker lag, streak length, server reply time.
+  const lag={n:0,tiktok:0,tiktokMax:0,streak:0,streakMax:0,ends:0,reply:0,replyMax:0,replies:0},firstSeen=new Map();
+  const lagTimer=setInterval(()=>{if(s.conn!==c||s.stopped){clearInterval(lagTimer);return;}if(lag.n)log(`[gift-lag] @${username} last min: ${lag.n} gifts, TikTok->worker avg ${Math.round(lag.tiktok/lag.n)}ms max ${lag.tiktokMax}ms; streak wait avg ${lag.ends?Math.round(lag.streak/lag.ends):0}ms max ${lag.streakMax}ms; server reply avg ${lag.replies?Math.round(lag.reply/lag.replies):0}ms max ${lag.replyMax}ms`);Object.assign(lag,{n:0,tiktok:0,tiktokMax:0,streak:0,streakMax:0,ends:0,reply:0,replyMax:0,replies:0});if(firstSeen.size>500)firstSeen.clear();},60_000);lagTimer.unref?.();
+  const timeReply=(task)=>{const t=Date.now();void Promise.resolve(task).finally(()=>{const ms=Date.now()-t;lag.reply+=ms;lag.replies++;lag.replyMax=Math.max(lag.replyMax,ms);});};
   c.on(WebcastEvent.GIFT, (d) => { seeViewer(d?.user);
     if (s.stopped || s.conn !== c || !c.isConnected) return;
+    { const now=Date.now(),ct=Number(d.common?.createTime??d.createTime??0); if(ct>1e12&&ct<now+60_000){const ms=Math.max(0,now-ct);lag.n++;lag.tiktok+=ms;lag.tiktokMax=Math.max(lag.tiktokMax,ms);}
+      const key=String(d.groupId??'')+':'+String(d.user?.userId??d.userId??'')+':'+String(d.giftId??''); const end=d.repeatEnd===true||Number(d.repeatEnd)===1;
+      if(!firstSeen.has(key))firstSeen.set(key,now); if(end){const ms=now-firstSeen.get(key);firstSeen.delete(key);lag.ends++;lag.streak+=ms;lag.streakMax=Math.max(lag.streakMax,ms);} }
     const g = d.giftDetails || d.gift || {};
     const giftType = Number(d.giftType ?? g.type ?? g.giftType ?? 0);
     const repeatEnd = d.repeatEnd === true || Number(d.repeatEnd) === 1;
@@ -250,12 +257,12 @@ function connect(s) {
       ...(battleId ? { battleId } : {}),
     };
     if (battleId) deliverBattle(s, () => get(s, "/api/public/gift", giftParams));
-    else get(s, "/api/public/gift", giftParams);
+    else timeReply(get(s, "/api/public/gift", giftParams));
   });
   c.on(WebcastEvent.LIKE, (d) => { seeViewer(d?.user);
     if (s.stopped || s.conn !== c || !c.isConnected) return;
     const like = liveLike(d); if (!like) return;
-    if (like.eventId) post(s, "/api/public/events", { type: "like", username: handleOf(d), sender_user_id: like.sender, likes: like.count, event_id: like.eventId, live_generation: s.generation, ...likeMetadata(d) });
+    if (like.eventId) post(s, "/api/public/events", { type: "like", username: handleOf(d), sender_user_id: like.sender, likes: like.count, like_count_mode: 'delta', event_id: like.eventId, live_generation: s.generation, ...likeMetadata(d) });
     s.likeDelivery.add(like.count);
   });
   const joins = createJoinNormalizer(); // Socket-local: never carry identities into another room.
